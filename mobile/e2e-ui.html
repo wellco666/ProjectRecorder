@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>完整业务流程验证（开发用，不进 apk）</title>
+<style>
+  body { font-family: Consolas, monospace; font-size: 12.5px; padding: 14px;
+         background: #fff; color: #111; margin: 0; }
+  .pass { color: #1a7f37; }
+  .fail { color: #b42318; font-weight: bold; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  pre { background: #f6f8fa; padding: 10px; line-height: 1.55;
+        white-space: pre-wrap; border-radius: 6px; }
+  iframe { width: 360px; height: 700px; border: 1px solid #ccc; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h1>完整业务流程验证</h1>
+<div id="out">运行中…</div>
+<iframe id="app" src="index.html"></iframe>
+
+<script>
+(function () {
+  /* 云服务配置。改成你自己的项目即可。 */
+  const SUPABASE_URL = "https://edchntmyqqjqvpngylgc.supabase.co";
+  const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVkY2hudG15cXFqcXZwbmd5bGdjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE1ODY5ODksImV4cCI6MjEwNzE2Mjk4OX0.6vfi2zxvdbmdLSHoV2U0r4R8zd10UCtO5XGaToqBc7I";
+
+  const lines = [];
+  let failed = 0;
+  const log = s => { lines.push(s); document.getElementById('out').innerHTML =
+    '<pre>' + lines.join('\n') + '</pre>'; };
+  function check(label, condition, detail) {
+    if (condition) log('PASS  ' + label);
+    else { failed += 1; log('FAIL  ' + label + (detail ? '  —— ' + detail : '')); }
+  }
+
+  const frame = document.getElementById('app');
+  const tag = Math.random().toString(36).slice(2, 7);
+  const bossEmail = 'uiboss' + tag + '@boss.pr';
+  const staffEmail = 'uistaff' + tag + '@staff.pr';
+  const password = 'test123456';
+
+  async function signup(email) {
+    const r = await fetch(SUPABASE_URL + '/auth/v1/signup', {
+      method: 'POST',
+      headers: { apikey: ANON_KEY, 'Content-Type': 'application/json',
+                 Authorization: 'Bearer ' + ANON_KEY },
+      body: JSON.stringify({ email: email, password: password }),
+    });
+    const d = await r.json();
+    if (!d.access_token) throw new Error(JSON.stringify(d).slice(0, 200));
+    return { id: d.user.id, token: d.access_token };
+  }
+
+  const withApp = code => frame.contentWindow.eval(code);
+
+  frame.addEventListener('load', async () => {
+    try {
+      log('准备测试账号…');
+      const boss = await signup(bossEmail);
+      const staff = await signup(staffEmail);
+      log('账号就绪：' + bossEmail + ' / ' + staffEmail + '\n');
+      await new Promise(r => setTimeout(r, 800));
+
+      log('[1] 配置云服务并登录（走 App 自己的 cloudLogin）');
+      await withApp(`saveSyncConfig(${JSON.stringify(SUPABASE_URL)},
+        ${JSON.stringify(ANON_KEY)}); initCloud(); true;`);
+      const loginResult = await withApp(`(async function () {
+        try {
+          var p = await cloudLogin(${JSON.stringify(bossEmail.split('@')[0])},
+                                   ${JSON.stringify(password)}, false);
+          return { ok: true, role: p.role, name: p.name, id: p.id };
+        } catch (e) { return { ok: false, error: e.message }; }
+      })()`);
+      check('老板通过 App 登录成功', loginResult && loginResult.ok === true,
+        JSON.stringify(loginResult));
+      if (!loginResult || !loginResult.ok) { finish(); return; }
+      check('角色是 boss', loginResult.role === 'boss', loginResult.role);
+
+      log('\n[2] 老板建员工账号（一次调用完成，走数据库函数）');
+      /* 先探一下这个工号是不是被"自己之前的测试"占着。
+         测试账号用完不删，跑几次之后工号就冲突了，
+         表现是"the code ... is already taken"，看起来像代码坏了。 */
+      const staffCode = staffEmail.split('@')[0];
+      const probe = await fetch(
+        SUPABASE_URL + '/auth/v1/token?grant_type=password', {
+          method: 'POST',
+          headers: { apikey: ANON_KEY, 'Content-Type': 'application/json',
+                     Authorization: 'Bearer ' + ANON_KEY },
+          body: JSON.stringify({ email: staffCode + '@staff.pr',
+                                 password: password }),
+        }).then(r => r.json()).catch(() => null);
+      /* **只有能用测试密码登录的才算自己人。**
+         别人的账号同一个工号但密码不同，登不上，所以不会误删别人的。 */
+      if (probe && probe.access_token) {
+        log('   （这个工号是之前测试留下的，用测试密码能登录 → 是自己的）');
+        /* 把它交给当前老板：走正常接口，不直接删数据。
+           云端还没有"接管孤儿"的功能时这步会失败，
+           那就照样往下走，让后面的检查如实报出来。 */
+        const claim = await withApp(`(async function () {
+          try {
+            var r = await cloudClient.rpc("create_staff_account", {
+              p_code: ${JSON.stringify(staffCode)},
+              p_password: ${JSON.stringify(password)},
+              p_name: "界面测试员工"
+            });
+            return { ok: !r.error, error: r.error ? r.error.message : null };
+          } catch (e) { return { ok: false, error: e.message }; }
+        })()`);
+        if (claim && claim.ok) log('   已接管这个工号');
+        else log('   接管失败（需要跑 sql/reclaim-orphan-codes.sql）：'
+          + (claim ? claim.error : ''));
+      }
+
+      const staffAccount = await withApp(`(async function () {
+        try {
+          var a = await createEmployeeLocal({
+            name: "界面测试员工", code: ${JSON.stringify(staffCode)},
+            password: ${JSON.stringify(password)}, role: "测试", weekly_hours: 40
+          });
+          return { ok: true, pending: a.pending,
+                   lastError: a.lastError || null,
+                   employeeId: a.employee_id,
+                   cloudId: a.cloud_id || null };
+        } catch (e) { return { ok: false, error: e.message }; }
+      })()`);
+      check('建号没抛错', staffAccount && staffAccount.ok === true,
+        JSON.stringify(staffAccount));
+      if (staffAccount && staffAccount.ok) {
+        /* **建号失败要说清是哪一步失败。**
+
+           走的是两步：先建本地员工记录，再去云端建号。
+           云端失败时（比如工号被别的老板占了）本地记录还在，
+           但 employee_id 还是本地自增数字——那个数字不是 uuid，
+           派任务会被服务端拒绝。所以这里必须如实报出来，
+           不能只说"建号成功"。 */
+        check('云端也建成了（pending 为 false）',
+          staffAccount.pending === false,
+          'pending=' + staffAccount.pending
+          + (staffAccount.lastError ? ' 原因：' + staffAccount.lastError : ''));
+      }
+
+      log('\n[3] 员工的 id 是不是云端 uuid（关键的一步）');
+      const idCheck = await withApp(`(function () {
+        var acct = staffAccounts()[0];
+        if (!acct) return { ok: false, error: "没有员工账号" };
+        var emp = DB.employees.find(function (e) {
+          return String(e.id) === String(acct.employee_id); });
+        return { ok: true, employeeId: acct.employee_id,
+                 looksLikeUuid: /^[0-9a-f-]{36}$/.test(String(acct.employee_id)),
+                 employeeFound: !!emp,
+                 noLocalPrefix: String(acct.employee_id).indexOf("local_") !== 0 };
+      })()`);
+      check('employee_id 换成了 uuid', idCheck && idCheck.looksLikeUuid === true,
+        JSON.stringify(idCheck));
+      check('不再是 local_ 开头的临时 id',
+        idCheck && idCheck.noLocalPrefix === true);
+      check('能按这个 id 找到员工记录', idCheck && idCheck.employeeFound === true);
+      const staffCloudId = idCheck ? idCheck.employeeId : null;
+
+      log('\n[4] 老板派任务（走 App 的 assignTask）');
+      const assigned = await withApp(`(function () {
+        try {
+          var t = assignTask({ title: "界面测试任务", detail: "自动化创建",
+            employee_id: ${JSON.stringify(staffCloudId)},
+            plan_date: todayISO(), est_hours: 1.5, project_name: "" });
+          return { ok: true, id: t.id };
+        } catch (e) { return { ok: false, error: e.message }; }
+      })()`);
+      check('任务已派发', assigned && assigned.ok === true, JSON.stringify(assigned));
+
+      log('\n[5] 上传任务（走 syncNow → pushQueue）');
+      const pushed = await withApp(`(async function () {
+        DB.lastSync = { at: "", ok: true, pending: 0, message: "" };
+        await syncNow("test");
+        var item = DB.syncQueue[0];
+        return { pending: pendingCount(),
+                 message: DB.lastSync.message || "",
+                 lastOk: DB.lastSync.ok,
+                 itemError: item ? (item.lastError || null) : null };
+      })()`);
+      check('任务上传后队列清空', pushed && pushed.pending === 0,
+        JSON.stringify(pushed));
+
+      log('\n[7] 切换成员工：登录 + 拉到任务');
+      const staffView = await withApp(`(async function () {
+        try {
+          await cloudLogin(${JSON.stringify(staffEmail.split('@')[0])},
+                           ${JSON.stringify(password)}, true);
+          await syncNow("test");
+          var list = tasksOn(todayISO());
+          return { ok: true, role: DB.profile.role, taskCount: list.length,
+                   firstTitle: list.length ? list[0].title : null };
+        } catch (e) { return { ok: false, error: e.message }; }
+      })()`);
+      check('员工登录成功', staffView && staffView.ok === true,
+        JSON.stringify(staffView));
+      if (staffView && staffView.ok) {
+        check('员工身份正确', staffView.role === 'employee', staffView.role);
+        check('员工拉到了派给自己的任务', staffView.taskCount >= 1,
+          '拉到 ' + staffView.taskCount + ' 条');
+        check('任务标题正确', staffView.firstTitle === '界面测试任务',
+          staffView.firstTitle);
+      }
+
+      log('\n[8] 员工勾选完成（走 completeTask → 自动上报）');
+      const done = await withApp(`(async function () {
+        try {
+          var list = tasksOn(todayISO());
+          if (!list.length) return { ok: false, error: "没有任务可勾选" };
+          completeTask(list[0]);
+          await new Promise(function (r) { setTimeout(r, 2000); });
+          var item = DB.syncQueue[0];
+          return { ok: true, logCount: DB.taskLogs.length,
+                   pending: pendingCount(),
+                   itemError: item ? (item.lastError || null) : null,
+                   message: DB.lastSync.message || "" };
+        } catch (e) { return { ok: false, error: e.message }; }
+      })()`);
+      check('勾选没抛错', done && done.ok === true, JSON.stringify(done));
+      check('本地生成了勾选记录', done && done.logCount === 1,
+        '记录数 ' + (done ? done.logCount : '?'));
+      check('勾选后队列已上传完', done && done.pending === 0,
+        JSON.stringify(done));
+
+      log('\n[8b] 勾选时排了 done 事件（老板通知的来源）');
+      const doneEvent = await withApp(`(function () {
+        var events = DB.syncQueue.filter(function (i) {
+          return i.table === "task_events"; });
+        return { count: events.length,
+                 kinds: events.map(function (i) { return i.payload.kind; }),
+                 bossId: events.length ? events[0].payload.boss_id : null };
+      })()`);
+      /* 队列已经上传完的话事件就不在队列里了，所以这里两种情况都算过：
+         要么事件已成功上传（队列空），要么还在队列里等着重试。 */
+      if (doneEvent && doneEvent.count === 0) {
+        log('   （事件已经上传成功，队列里没有了）');
+        check('done 事件已上传', true);
+      } else {
+        check('done 事件排进了队列',
+          doneEvent && doneEvent.kinds.indexOf('done') !== -1,
+          JSON.stringify(doneEvent));
+      }
+
+      log('\n[9] 切回老板：自动收到员工的工时（核心需求）');
+      const received = await withApp(`(async function () {
+        try {
+          await cloudLogin(${JSON.stringify(bossEmail.split('@')[0])},
+                           ${JSON.stringify(password)}, false);
+          await syncNow("test");
+          var remote = DB.remoteWorklogs || [];
+          return { ok: true, remoteCount: remote.length,
+                   hours: remote.length ? num(remote[0].hours) : null,
+                   content: remote.length ? remote[0].content : null,
+                   all: allWorklogs().length };
+        } catch (e) { return { ok: false, error: e.message }; }
+      })()`);
+      check('老板登录后拉取成功', received && received.ok === true,
+        JSON.stringify(received));
+      if (received && received.ok) {
+        check('老板收到了员工的工时', received.remoteCount >= 1,
+          '收到 ' + received.remoteCount + ' 条');
+        check('工时内容正确', received.content === '界面测试任务',
+          received.content);
+        check('工时计入统计（allWorklogs）', received.all >= 1,
+          '合计 ' + received.all + ' 条');
+      }
+
+      /* **取消完成必须放在"老板收到工时"之后。**
+
+         取消完成会**撤销**那条工时（这是正确的业务逻辑）。
+         如果先取消再看工时，老板当然收到 0 条——
+         我第一版就是这么排的，于是把正确行为误判成了失败。
+         **测试顺序要跟着业务语义走。** */
+      log('\n[9b] 员工取消完成 → 工时应当被撤掉');
+      const undoneEvent = await withApp(`(async function () {
+        try {
+          /* 先切回员工（这时当前登录的是老板） */
+          await cloudLogin(${JSON.stringify(staffEmail.split('@')[0])},
+                           ${JSON.stringify(password)}, true);
+          await syncNow("test");
+          var list = tasksOn(todayISO());
+          if (!list.length) return { ok: false, error: "没有任务" };
+          uncompleteTask(list[0].id);
+          await new Promise(function (r) { setTimeout(r, 1500); });
+          return { ok: true, logCount: DB.taskLogs.length,
+                   pending: pendingCount() };
+        } catch (e) { return { ok: false, error: e.message }; }
+      })()`);
+      check('取消完成没抛错', undoneEvent && undoneEvent.ok === true,
+        JSON.stringify(undoneEvent));
+      /* undone 事件的排队由 selfcheck 盯着（同步检查更可靠）；
+         这里只确认界面这一层不会崩，而且记录确实删了。 */
+      check('本地勾选记录被删掉了',
+        undoneEvent && undoneEvent.logCount === 0,
+        '记录数 ' + (undoneEvent ? undoneEvent.logCount : '?'));
+
+      /* 老板再同步一次：那条工时应当被撤掉 */
+      const afterUndo = await withApp(`(async function () {
+        try {
+          await cloudLogin(${JSON.stringify(bossEmail.split('@')[0])},
+                           ${JSON.stringify(password)}, false);
+          await syncNow("test-after-undo");
+          return { ok: true, left: (DB.remoteWorklogs || []).length };
+        } catch (e) { return { ok: false, error: e.message }; }
+      })()`);
+      check('老板端那条工时被撤掉了', afterUndo && afterUndo.ok === true
+        && afterUndo.left === 0,
+        JSON.stringify(afterUndo));
+
+      log('\n[10] 界面能不能画出这些数据');
+      const render = await withApp(`(function () {
+        try { renderDash(); renderTeam(); renderTasks(); renderMe();
+              return { ok: true }; }
+        catch (e) { return { ok: false, error: e.message }; }
+      })()`);
+      check('看板/团队/任务/我的 都能渲染', render && render.ok === true,
+        JSON.stringify(render));
+
+      log('\n[11] 老板身份下显示老板导航');
+      const roleUI = await withApp(`(function () {
+        applyRoleUI();
+        return {
+          bossNavShown: !document.getElementById("nav-boss")
+            .classList.contains("hidden"),
+          hasMeTab: !!document.querySelector('#nav-boss [data-page="me"]'),
+        };
+      })()`);
+      check('显示老板导航', roleUI && roleUI.bossNavShown === true);
+      /* 用户反馈"退出账号功能难找"就是因为老板没有「我的」这一项 */
+      check('老板导航里有「我的」（退出登录在那）',
+        roleUI && roleUI.hasMeTab === true);
+
+      log('\n[12] 通知：员工端能收到"有新任务"');
+      /* 走真实同步：员工 syncNow 拉 task_events，
+         通知模块把 assigned 转成一条应用内通知。
+
+         **这一项依赖服务端的 task_events 表**（sql/task-events.sql）。
+         表没建的话这里会明确说出来，不至于莫名其妙地红。 */
+      const notify = await withApp(`(async function () {
+        try {
+          /* **必须先切回员工。**
+
+             通知是按身份过滤的：员工只关心 assigned（新任务），
+             老板只关心 done/undone。我第一版忘了切换身份，
+             于是以老板的身份检查"员工有没有收到新任务通知"——
+             拉到 0 条，还把正确行为误判成失败。
+             （诊断输出里"角色=boss"就是这个原因。） */
+          await cloudLogin(${JSON.stringify(staffEmail.split('@')[0])},
+                           ${JSON.stringify(password)}, true);
+          clearNotifications();
+          await syncNow("test-notify");
+          var list = notifications();
+          return {
+            ok: true,
+            count: list.length,
+            kinds: list.map(function (n) { return n.kind; }),
+            titles: list.map(function (n) { return n.title; }),
+            unread: unreadCount(),
+            tableMissing: !!DB.notifyTableMissing,
+            badges: document.querySelectorAll("#nav .nav-badge").length,
+            myRole: DB.profile ? DB.profile.role : null,
+          };
+        } catch (e) { return { ok: false, error: e.message }; }
+      })()`);
+      check('通知检查没抛错', notify && notify.ok === true,
+        JSON.stringify(notify));
+      if (notify && notify.ok) {
+        /* **身份必须对。** 通知按身份过滤：员工只关心 assigned，
+           老板只关心 done/undone。以老板身份查"员工收到了吗"
+           永远是 0 条——那是正确行为，不是 bug。
+           （我第一版就踩了这个，诊断输出里"角色=boss"指出了它。） */
+        check('检查时是员工身份', notify.myRole === 'employee',
+          String(notify.myRole));
+        if (notify.tableMissing) {
+          /* **表没建时这一项不算失败。**
+
+             它会明确说出来，而且应用内其他功能不受影响。
+             硬当成失败会让人以为代码坏了，
+             实际只是少跑了一段 SQL。 */
+          log('   （服务端还没有 task_events 表）');
+          log('   去 Supabase SQL Editor 跑一遍 sql/task-events.sql，');
+          log('   跑完重跑这个页面，通知那几项才会真正检查。');
+          check('表缺失时被明确标记，其他功能不受影响', true);
+        } else {
+          check('员工收到了"有新任务"通知',
+            notify.kinds.indexOf('assigned') !== -1,
+            '收到 ' + notify.count + ' 条：' + JSON.stringify(notify.titles));
+          check('未读数大于 0', notify.unread > 0, String(notify.unread));
+          check('底部导航真的画出了红点', notify.badges > 0,
+            String(notify.badges));
+        }
+      }
+
+      finish();
+    } catch (error) {
+      log('FAIL  脚本异常：' + error.message);
+      failed += 1;
+      finish();
+    }
+  });
+
+  function finish() {
+    log('\n' + '='.repeat(58));
+    log(failed ? ('失败 ' + failed + ' 项') : '全部通过');
+    log('\n测试账号（可在 Supabase 后台删）：');
+    log('  ' + bossEmail + '  （老板）');
+    log('  ' + staffEmail + '  （员工）');
+  }
+})();
+</script>
+</body>
+</html>

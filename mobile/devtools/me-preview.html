@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>我的页预览（开发用）</title>
+<style>
+  body { font-family: Consolas, monospace; font-size: 13px; padding: 10px; margin: 0; }
+  .shots { display: flex; gap: 16px; }
+  iframe { width: 375px; height: 800px; border: 1px solid #ccc; }
+  p { margin: 0 0 8px; }
+  .note { color: #78828f; font-size: 12px; }
+</style>
+</head>
+<body>
+<p>左：老板的「我的」　右：员工的「我的」</p>
+<p class="note">两个 iframe 同源、共用 localStorage，所以分别用
+  <code>?role=boss</code> 和 <code>?role=staff</code> 分两次单独截图，
+  而不是并排。</p>
+<div class="shots">
+  <iframe id="frame" src="index.html"></iframe>
+</div>
+<script>
+/* 参数：?role=boss 或 ?role=staff
+   一次只渲染一个，避免 localStorage 互相覆盖。 */
+const DB_KEY = 'pr_database_v1';
+const params = new URLSearchParams(location.search);
+const role = params.get('role') || 'boss';
+
+const frame = document.getElementById('frame');
+let loads = 0;
+frame.addEventListener('load', () => {
+  loads += 1;
+  const win = frame.contentWindow;
+  if (loads === 1) {
+    /* 先写好登录状态，再让 App 重新启动 */
+    win.localStorage.setItem(DB_KEY, JSON.stringify({
+      schema: 1,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      profile: {
+        id: role === 'boss' ? '11111111-2222-3333-4444-555555555555'
+                            : '66666666-7777-8888-9999-000000000000',
+        code: role === 'boss' ? '19155025818' : 'A001',
+        name: role === 'boss' ? '王老板' : '张三',
+        role: role,
+      },
+      lastSync: { at: new Date().toISOString(), ok: true,
+                  pending: 0, message: '' },
+    }));
+    win.location.reload();
+    return;
+  }
+  /* 第二次加载：App 已按登录状态启动，切到「我的」 */
+  setTimeout(() => {
+    win.applyRoleUI();
+    win.showPage('me');
+    document.title = '我的页 - ' + role;
+  }, 300);
+});
+</script>
+</body>
+</html>

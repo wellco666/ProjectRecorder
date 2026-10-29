@@ -1,0 +1,127 @@
+apply plugin: 'com.android.application'
+
+/* 正式签名。
+
+   ## 为什么要读一个单独的文件
+
+   密钥库路径和密码不该写进 build.gradle（那会被提交到仓库）。
+   keystore.properties 在 .gitignore 里，由
+   `make-release-keystore.ps1` 生成。
+
+   ## 文件不存在时要能正常构建
+
+   开发时经常还没有正式签名（或者别人刚 clone 下来）。
+   那种情况下**不能让构建失败**——退回不签名，
+   照常能出 debug 包。（`assembleRelease` 会产出未签名包，
+   Gradle 会提示，这是预期行为。）
+
+   ## 为什么这件事必须排在厂商注册之前
+
+   华为和荣耀注册推送应用时要填**签名证书指纹**。
+   如果先用 debug 签名注册、以后换成正式签名，
+   **所有厂商注册全部失效、要重来**。
+   所以先建密钥库，用它的指纹去注册。 */
+def keystorePropsFile = rootProject.file("app/keystore.properties")
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
+android {
+    namespace = "com.cj.projectrecorder"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.cj.projectrecorder"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+        // Public app IDs are supplied locally; REST AppSecret never goes in the APK.
+        manifestPlaceholders = [
+            GETUI_APPID: (project.findProperty('GETUI_APPID') ?: System.getenv('GETUI_APPID') ?: ''),
+            HUAWEI_APP_ID: (project.findProperty('HUAWEI_APP_ID') ?: System.getenv('HUAWEI_APP_ID') ?: ''),
+            XIAOMI_APP_ID: (project.findProperty('XIAOMI_APP_ID') ?: System.getenv('XIAOMI_APP_ID') ?: ''),
+            XIAOMI_APP_KEY: (project.findProperty('XIAOMI_APP_KEY') ?: System.getenv('XIAOMI_APP_KEY') ?: ''),
+            OPPO_APP_KEY: (project.findProperty('OPPO_APP_KEY') ?: System.getenv('OPPO_APP_KEY') ?: ''),
+            OPPO_APP_SECRET: (project.findProperty('OPPO_APP_SECRET') ?: System.getenv('OPPO_APP_SECRET') ?: ''),
+            VIVO_APP_ID: (project.findProperty('VIVO_APP_ID') ?: System.getenv('VIVO_APP_ID') ?: ''),
+            VIVO_APP_KEY: (project.findProperty('VIVO_APP_KEY') ?: System.getenv('VIVO_APP_KEY') ?: ''),
+            MEIZU_APP_ID: (project.findProperty('MEIZU_APP_ID') ?: System.getenv('MEIZU_APP_ID') ?: ''),
+            MEIZU_APP_KEY: (project.findProperty('MEIZU_APP_KEY') ?: System.getenv('MEIZU_APP_KEY') ?: ''),
+            HONOR_APP_ID: (project.findProperty('HONOR_APP_ID') ?: System.getenv('HONOR_APP_ID') ?: '')
+        ]
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            /* 没有密钥库就不挂签名配置，让构建照常跑完
+               （Gradle 会产出一个未签名的 release 包并提示）。 */
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            /* 有正式签名时，**debug 也用正式签名**。
+
+               这样厂商推送的签名校验对调试包也成立——
+               否则你只能在正式包上测离线推送，
+               而华为明确说"调试包验证不了离线推送"。
+
+               注意：换签名要卸载重装（签名不同 Android 不让覆盖装）。 */
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+    implementation 'com.getui:gtsdk:3.3.16.0'
+    implementation 'com.getui:gtc:3.3.3.0'
+    implementation 'com.getui.opt:hwp:3.1.4'
+    implementation 'com.huawei.hms:push:6.12.0.300'
+    implementation 'com.getui.opt:xmp:3.3.7'
+    implementation 'com.assist-v3:oppo:3.6.0'
+    implementation 'com.assist-v3:vivo:3.2.0'
+    implementation 'com.getui.opt:mzp:3.3.2'
+    implementation 'com.getui.opt:ups:3.0.3'
+    implementation 'com.getui.opt:honor:3.6.0'
+    implementation 'com.google.code.gson:gson:2.6.2'
+    implementation 'commons-codec:commons-codec:1.6'
+    implementation 'com.android.support:support-annotations:28.0.0'
+}
+
+apply from: 'capacitor.build.gradle'
+

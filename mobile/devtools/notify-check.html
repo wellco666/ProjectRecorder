@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>通知 API 检查（开发用）</title>
+<style>
+  body { font-family: Consolas, monospace; font-size: 13px; padding: 12px; margin: 0; }
+  .pass { color: #1a7f37; font-weight: bold; }
+  .fail { color: #b42318; font-weight: bold; }
+  pre { background: #f6f8fa; padding: 10px; white-space: pre-wrap; line-height: 1.5; }
+</style>
+</head>
+<body>
+<h1>通知 API 检查</h1>
+<pre id="out">运行中…</pre>
+<iframe id="app" src="index.html" style="width:360px;height:600px;border:1px solid #ccc"></iframe>
+<script>
+const lines = [];
+let failed = 0;
+const log = s => { lines.push(s); document.getElementById('out').innerHTML =
+  (failed ? '<span class="fail">失败 ' + failed + ' 项</span>'
+          : '<span class="pass">全部通过</span>')
+  + '<pre>' + lines.join('\n') + '</pre>'; };
+function check(label, cond, detail) {
+  if (cond) log('PASS  ' + label);
+  else { failed += 1; log('FAIL  ' + label + (detail ? '  —— ' + detail : '')); }
+}
+
+document.getElementById('app').addEventListener('load', () => {
+  setTimeout(() => {
+    const w = document.getElementById('app').contentWindow;
+
+    /* 1. notify.js 的函数都在 */
+    ['addNotification', 'notifications', 'unreadCount', 'markNotificationsRead',
+     'clearNotifications', 'notifyPrefs', 'saveNotifyPrefs', 'notifyEnabled',
+     'ingestEvents', 'ingestWorklogSummary', 'ingestProjectStatus',
+     'renderNotifyBadges', 'renderNotifyBanner', 'openNotifyCenter',
+     'requestNotifyPermission', 'pushSystemNotification', 'pumpNotifications',
+     'describeEvent'].forEach(name => {
+      check('函数存在：' + name, typeof w[name] === 'function');
+    });
+
+    /* 2. 常量。
+       **注意：顶层 const 不挂在 window 上**，所以要用 w.eval 而不是
+       w.NOTIFY_KINDS。之前直接用 w.NOTIFY_KINDS 得到 undefined，
+       却写成"检查通过"的假象——这类"断言写错导致假通过"要避免。 */
+    const kinds = w.eval('Object.keys(NOTIFY_KINDS).join(",")');
+    check('NOTIFY_KINDS 有五类',
+      String(kinds).split(',').length === 5, String(kinds));
+    check('上限是 200', w.eval('NOTIFY_KEEP') === 200,
+      String(w.eval('NOTIFY_KEEP')));
+
+    /* 3. 关键：Capacitor 桥不在时不能崩 */
+    log('');
+    log('--- 浏览器里没有 Capacitor 桥，检查降级行为 ---');
+    check('window.Capacitor 不存在（浏览器里就是这样）',
+      typeof w.Capacitor === 'undefined');
+    /* requestNotifyPermission 应当返回 supported:false，而不是抛错 */
+    w.requestNotifyPermission().then(result => {
+      check('没有桥时 requestNotifyPermission 不抛错', true);
+      check('返回 supported:false', result && result.supported === false,
+        JSON.stringify(result));
+
+      return w.pushSystemNotification({ title: 't', body: 'b' });
+    }).then(result => {
+      check('没有桥时 pushSystemNotification 返回 false', result === false,
+        String(result));
+
+      /* 3b. **两条桥接路径都要试。**
+
+         安卓 apk 里是原生插件（window.Capacitor.Plugins.LocalNotifications），
+         电脑浏览器里是 @capacitor/core 的 web 实现（getPlugin）。
+         只认第一条的话，电脑上永远试不出系统通知；
+         只认第二条的话，apk 里可能拿不到（取决于注册方式）。
+
+         这里手动造两种桥，确认 notifyBridge 都认得。 */
+      log('');
+      log('--- 两条桥接路径 ---');
+
+      /* 路径 1：原生插件挂在 Plugins 上 */
+      w.eval(`window.Capacitor = {
+        Plugins: { LocalNotifications: {
+          checkPermissions: function () {
+            return Promise.resolve({ display: "granted" }); },
+          requestPermissions: function () {
+            return Promise.resolve({ display: "granted" }); },
+          schedule: function (opts) {
+            window.__scheduled = opts; return Promise.resolve({}); },
+        } },
+      };`);
+      const viaPlugins = w.eval('notifyBridge() !== null');
+      check('路径 1：Plugins.LocalNotifications 认得', viaPlugins === true);
+      check('插件名正好是 LocalNotifications（和插件源码一致）',
+        w.eval('typeof Capacitor.Plugins.LocalNotifications.schedule')
+          === 'function');
+
+      /* 路径 2：只有 getPlugin（web 实现那条） */
+      w.eval(`window.Capacitor = {
+        getPlugin: function (name) {
+          if (name !== "LocalNotifications") return null;
+          return {
+            checkPermissions: function () {
+              return Promise.resolve({ display: "granted" }); },
+            requestPermissions: function () {
+              return Promise.resolve({ display: "granted" }); },
+            schedule: function (opts) {
+              window.__scheduled2 = opts; return Promise.resolve({}); },
+          };
+        },
+      };`);
+      check('路径 2：getPlugin 也认得',
+        w.eval('notifyBridge() !== null') === true);
+
+      /* 两条都没有时返回 null，而不是抛错 */
+      w.eval('window.Capacitor = {};');
+      check('两条都没有时返回 null（不抛错）',
+        w.eval('notifyBridge() === null'));
+
+      /* 3c. 真的能发出通知：用一个 granted 的假桥，
+             并把 document.hidden 伪装成"App 在后台"。 */
+      log('');
+      log('--- 有权限、且在后台时应当真的发出通知 ---');
+      w.eval(`window.Capacitor = {
+        Plugins: { LocalNotifications: {
+          checkPermissions: function () {
+            return Promise.resolve({ display: "granted" }); },
+          requestPermissions: function () {
+            return Promise.resolve({ display: "granted" }); },
+          schedule: function (opts) {
+            window.__sent = opts; return Promise.resolve({}); },
+        } },
+      };
+      window.__sent = null;
+      /* 伪装成后台：pushSystemNotification 靠 document.hidden 判断 */
+      Object.defineProperty(document, "hidden", {
+        configurable: true, get: function () { return true; } });`);
+
+      return w.pushSystemNotification({ title: '有新任务', body: '写接口' })
+        .then(sent => {
+          check('后台 + 有权限时返回 true', sent === true, String(sent));
+          const payload = w.eval('window.__sent');
+          check('真的调了 schedule', !!payload);
+          if (payload && payload.notifications && payload.notifications[0]) {
+            const n = payload.notifications[0];
+            check('通知标题正确', n.title === '有新任务', String(n.title));
+            check('通知正文正确', n.body === '写接口', String(n.body));
+            check('smallIcon 用的是真实存在的资源', n.smallIcon === 'ic_launcher',
+              String(n.smallIcon));
+          }
+        });
+    }).then(() => {
+
+      /* 4. pumpNotifications 在没有事件时也该正常返回 */
+      return w.pumpNotifications({ events: null, worklogs: null });
+    }).then(result => {
+      check('pumpNotifications 空参数不崩',
+        result && typeof result.added === 'number', JSON.stringify(result));
+
+      /* 5. 界面元素都在 */
+      log('');
+      log('--- 界面容器 ---');
+      const d = w.document;
+      check('看板有提示条容器', !!d.getElementById('notify-banner-dash'));
+      check('任务页有提示条容器', !!d.getElementById('notify-banner-tasks'));
+      check('看板有通知入口', !!d.getElementById('btn-notify'));
+      check('任务页有通知入口', !!d.getElementById('btn-task-notify'));
+
+      /* 6. 红点渲染。
+         **不能写 w.DB.notifications = []**：DB 是 app.js 里用
+         `let` 声明的，不挂在 window 上，从外面写会写到 undefined。
+         一律走通知模块自己的函数。 */
+      log('');
+      log('--- 红点 ---');
+      w.clearNotifications();
+      w.addNotification({ key: 'x1', kind: 'assigned', title: '有新任务',
+                          body: '把接口补上' });
+      w.addNotification({ key: 'x2', kind: 'assigned', title: '有新任务2',
+                          body: '把接口补上2' });
+      check('加了两条通知', w.unreadCount() === 2, String(w.unreadCount()));
+      w.renderNotifyBadges();
+      const badges = d.querySelectorAll('#nav .nav-badge');
+      check('底部导航出现红点', badges.length > 0,
+        '找到 ' + badges.length + ' 个');
+      if (badges.length) {
+        check('红点数字是 2', badges[0].textContent === '2',
+          badges[0].textContent);
+      }
+      const menu = d.getElementById('btn-menu');
+      check('「⋯」加了未读小点', menu.classList.contains('has-dot'));
+
+      /* 7. 提示条渲染 */
+      w.renderNotifyBanner('notify-banner-dash');
+      const banner = d.querySelector('#notify-banner-dash .notify-banner');
+      check('提示条渲染出来了', !!banner);
+      if (banner) {
+        check('提示条里有最新那条的标题',
+          banner.textContent.indexOf('有新任务2') !== -1,
+          banner.textContent.trim().slice(0, 40));
+        check('提示条提到了还有几条',
+          banner.textContent.indexOf('还有 1 条') !== -1,
+          banner.textContent.trim().slice(0, 60));
+      }
+
+      /* 8. 点提示条能打开通知中心 */
+      if (banner) {
+        banner.click();
+        const sheet = d.getElementById('sheet');
+        check('点提示条打开了通知中心',
+          sheet && !sheet.classList.contains('hidden'));
+        check('通知中心标题是「通知」',
+          d.getElementById('sheet-title').textContent.trim() === '通知',
+          d.getElementById('sheet-title').textContent.trim());
+        check('通知中心里有偏好开关',
+          !!d.getElementById('notify-prefs'));
+        /* 打开通知中心会标记已读 */
+        check('打开后未读归零', w.unreadCount() === 0,
+          String(w.unreadCount()));
+      }
+
+      /* 8b. **「应用内提示」开关真的管用。**
+             这一步只能在真实 DOM 里做——沙箱里的 document 是桩，
+             querySelectorAll 永远返回空，断言会假通过。
+             （单元测试那边改成读源码来验，这里验真实效果。） */
+      log('');
+      log('--- 「应用内提示」开关 ---');
+      w.clearNotifications();
+      w.addNotification({ key: 't1', kind: 'assigned', title: '测试一',
+                          body: 'x' });
+      w.addNotification({ key: 't2', kind: 'assigned', title: '测试二',
+                          body: 'y' });
+      w.saveNotifyPrefs({ inApp: true });
+      w.renderNotifyBadges();
+      w.renderNotifyBanner('notify-banner-dash');
+
+      const onBadges = d.querySelectorAll('#nav .nav-badge').length;
+      const onBanner = !!d.querySelector(
+        '#notify-banner-dash .notify-banner');
+      check('开着时红点在', onBadges > 0, String(onBadges));
+      check('开着时提示条在', onBanner);
+
+      /* 关掉 → 红点和提示条都该消失 */
+      w.saveNotifyPrefs({ inApp: false });
+      w.renderNotifyBadges();
+      w.renderNotifyBanner('notify-banner-dash');
+
+      const offBadges = d.querySelectorAll('#nav .nav-badge').length;
+      const offBanner = !!d.querySelector(
+        '#notify-banner-dash .notify-banner');
+      check('关掉后红点消失', offBadges === 0, String(offBadges));
+      check('关掉后提示条消失', !offBanner);
+      const menu2 = d.getElementById('btn-menu');
+      check('关掉后「⋯」的小点也消失',
+        !menu2.classList.contains('has-dot'));
+
+      /* **数据不能被删掉**：开关管的是"提不提示"，不是"记不记" */
+      check('关掉后通知本身还在', w.notifications().length === 2,
+        String(w.notifications().length));
+      check('关掉后未读也没变', w.unreadCount() === 2,
+        String(w.unreadCount()));
+
+      /* 重新打开 → 又出现 */
+      w.saveNotifyPrefs({ inApp: true });
+      w.renderNotifyBadges();
+      const backBadges = d.querySelectorAll('#nav .nav-badge').length;
+      check('重新打开后红点回来', backBadges > 0, String(backBadges));
+
+      /* ==========================================================
+         「通知没装好」那条提示要能自己消失。
+
+         **这是用户真实遇到的问题**：他看到「我的」页写着
+         "通知功能没装好——去跑一遍 sql/migrate-notify.sql"，
+         但他早就跑过了。原因是 DB.notifyTableMissing 只进不出：
+         某次上传失败设成 true 写进本机存储，之后永远是 true。
+
+         这里直接验 verifyNotifyTable() 的行为：
+           · 表能读到  → 标记清掉
+           · 表不存在  → 标记保持
+           · 网络出错  → 标记保持（不能因为抖一下就撤提示）
+
+         ## 桩的写法
+
+         在 iframe 窗口里放一个**真的对象**，而不是拼一段代码字符串
+         注进去。我第一版用模板字符串拼 stub，结果里面的引号
+         把注入的代码弄坏了——iframe 里抛异常，整个异步块就卡住，
+         页面永远停在"运行中…"。**拼字符串注入是最容易出错的做法。**
+         ========================================================== */
+      log('');
+      log('--- 「通知没装好」的标记会自己消掉吗 ---');
+
+      /* 一个最小的查询链：.from().select().limit()
+
+         **必须用 w.eval 赋值，不能写 w.cloudClient = ...**
+
+         `let cloudClient` 和 `let DB` 都是**脚本作用域的 let**，
+         不挂在 window 上（只有函数声明和 var 才挂）。
+         所以 w.DB 是 undefined——直接赋值会报
+         "Cannot set properties of undefined"。
+
+         （这文件开头就有注释提醒过：
+           "顶层 const 不挂在 window 上，所以要用 w.eval"。）
+
+         ## 为什么先把桩对象放进 window.__stub
+
+         我第一版是把整个桩对象拼成一段代码字符串注进去，
+         结果转义出了问题，报 "Unexpected token '.'"。
+
+         现在只在外面拼**一句话**（cloudClient = window.__stub），
+         桩对象本身是**真的 JavaScript 对象**。
+         拼的代码越少，越不容易出错。 */
+      const STUB_SOURCE = `
+        function makeStub(outcome) {
+          return {
+            from: function () {
+              return {
+                select: function () {
+                  return {
+                    limit: function () {
+                      if (outcome === "ok") {
+                        return Promise.resolve({ data: [], error: null });
+                      }
+                      if (outcome === "missing") {
+                        return Promise.resolve({
+                          data: null,
+                          error: {
+                            message: "Could not find the table "
+                              + "'public.task_events' in the schema cache"
+                          }
+                        });
+                      }
+                      return Promise.reject(new Error("network down"));
+                    }
+                  };
+                }
+              };
+            }
+          };
+        }
+      `;
+      w.eval(STUB_SOURCE);
+      const stubQuery = outcome =>
+        w.eval('cloudClient = makeStub(' + JSON.stringify(outcome) + ');');
+
+      /* 读 / 写 iframe 里的 DB 也要走 w.eval */
+      const setFlag = value =>
+        w.eval('DB.notifyTableMissing = ' + (value ? 'true' : 'false') + ';');
+      const getFlag = () => w.eval('DB.notifyTableMissing');
+
+      /* **用 .then 而不是 await。**
+
+         这个文件是 `.then` 链的结构（没有 async 包裹），
+         直接写 await 会让整段脚本语法错误——
+         表现是页面永远停在"运行中…"，什么错误都不显示。
+         （`node _syntax.js` 一下就查出来了。） */
+      setFlag(true);
+      stubQuery('ok');
+      return w.verifyNotifyTable().then(cleared => {
+        check('表能读到 → 返回 true', cleared === true, String(cleared));
+        check('表能读到 → 标记被清掉', getFlag() === false,
+          String(getFlag()));
+
+        /* 表真不存在 → 保持 */
+        setFlag(true);
+        stubQuery('missing');
+        return w.verifyNotifyTable();
+      }).then(cleared => {
+        check('表不存在 → 返回 false', cleared === false, String(cleared));
+        check('表不存在 → 标记保持', getFlag() === true,
+          String(getFlag()));
+
+        /* 网络出错 → 保持（**这条最重要**：
+           抖一下就把提示撤掉，用户会以为好了，实际通知还是不通） */
+        setFlag(true);
+        stubQuery('network');
+        return w.verifyNotifyTable();
+      }).then(cleared => {
+        check('网络出错 → 返回 false', cleared === false, String(cleared));
+        check('网络出错 → 标记保持（不轻易下结论）', getFlag() === true,
+          String(getFlag()));
+
+        /* 收尾：清掉标记，别影响后面的检查 */
+        setFlag(false);
+
+        log('');
+        log('--- 完成 ---');
+      });
+    }).catch(error => {
+      failed += 1;
+      log('FAIL  异步检查抛错：' + error.message);
+    });
+  }, 900);
+});
+</script>
+</body>
+</html>

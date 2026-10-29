@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>老板管理入口检查（开发用）</title>
+<style>
+  body { font-family: Consolas, monospace; font-size: 13px; padding: 12px; margin: 0; }
+  .pass { color: #1a7f37; font-weight: bold; }
+  .fail { color: #b42318; font-weight: bold; }
+  pre { background: #f6f8fa; padding: 10px; white-space: pre-wrap; line-height: 1.5; }
+  .shots { display: flex; gap: 14px; margin-top: 10px; }
+  iframe { width: 360px; height: 640px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>老板管理入口检查</h1>
+<pre id="out">运行中…</pre>
+<div class="shots">
+  <iframe id="team" src="index.html"></iframe>
+  <iframe id="staff" src="index.html"></iframe>
+</div>
+<script>
+const lines = [];
+let failed = 0;
+const log = s => { lines.push(s); document.getElementById('out').innerHTML =
+  (failed ? '<span class="fail">失败 ' + failed + ' 项</span>'
+          : '<span class="pass">全部通过</span>')
+  + '<pre>' + lines.join('\n') + '</pre>'; };
+function check(label, cond, detail) {
+  if (cond) log('PASS  ' + label);
+  else { failed += 1; log('FAIL  ' + label + (detail ? '  —— ' + detail : '')); }
+}
+
+let loaded = 0;
+function onLoad() {
+  loaded += 1;
+  if (loaded < 2) return;
+  setTimeout(run, 900);
+}
+document.getElementById('team').addEventListener('load', onLoad);
+document.getElementById('staff').addEventListener('load', onLoad);
+
+function run() {
+  const teamWin = document.getElementById('team').contentWindow;
+  const teamDoc = teamWin.document;
+  const staffWin = document.getElementById('staff').contentWindow;
+  const staffDoc = staffWin.document;
+
+  /* 1. 团队页有没有这两个按钮 */
+  const gotoStaff = teamDoc.getElementById('btn-goto-staff');
+  const gotoAssign = teamDoc.getElementById('btn-goto-assign');
+  check('团队页有「员工账号」按钮', !!gotoStaff);
+  check('团队页有「派任务」按钮', !!gotoAssign);
+
+  if (gotoStaff) {
+    check('「员工账号」按钮有 onclick', typeof gotoStaff.onclick === 'function');
+    check('按钮文字对', gotoStaff.textContent.trim() === '员工账号',
+      gotoStaff.textContent.trim());
+    /* 尺寸要**先把团队页切到前台**才量得到：
+       页面隐藏时是 display:none，getBoundingClientRect 必然 0x0。
+       （这里误报过一次，和 layout 那次是同一类错误。） */
+    teamWin.showPage('team');
+    const rect = gotoStaff.getBoundingClientRect();
+    check('「员工账号」按钮可见（有尺寸）', rect.width > 0 && rect.height > 0,
+      Math.round(rect.width) + 'x' + Math.round(rect.height));
+  }
+
+  /* 2. 点了能不能进员工账号页 */
+  if (gotoStaff && typeof gotoStaff.onclick === 'function') {
+    gotoStaff.click();
+    const entered = !teamDoc.getElementById('page-staff')
+      .classList.contains('hidden');
+    check('点「员工账号」跳进了员工账号页', entered);
+    const newBtn = teamDoc.getElementById('btn-new-staff');
+    check('员工账号页有「+ 账号」按钮', !!newBtn);
+    check('「+ 账号」有 onclick',
+      !!newBtn && typeof newBtn.onclick === 'function');
+    if (newBtn && typeof newBtn.onclick === 'function') {
+      /* 点一下，看会不会弹出建号表单 */
+      newBtn.click();
+      const sheet = teamDoc.getElementById('sheet');
+      const shown = sheet && !sheet.classList.contains('hidden');
+      check('点「+ 账号」弹出了建号表单', shown);
+      const title = teamDoc.getElementById('sheet-title').textContent.trim();
+      check('表单标题是「新建员工账号」', title === '新建员工账号', title);
+      const hasName = !!teamDoc.getElementById('st-name');
+      const hasCode = !!teamDoc.getElementById('st-code');
+      const hasPass = !!teamDoc.getElementById('st-password');
+      check('表单有姓名/工号/密码三个输入框',
+        hasName && hasCode && hasPass,
+        '姓名=' + hasName + ' 工号=' + hasCode + ' 密码=' + hasPass);
+    }
+  }
+
+  /* 3. 直接渲染员工账号页 */
+  try {
+    staffWin.showPage('staff');
+    check('员工账号页能渲染', true);
+    const list = staffDoc.getElementById('staff-list');
+    check('空状态提示正确',
+      list.textContent.indexOf('还没有员工账号') !== -1,
+      list.textContent.trim().slice(0, 30));
+    const retry = staffDoc.getElementById('btn-sync-staff');
+    check('没有待建账号时重试按钮禁用',
+      retry && retry.disabled === true,
+      retry ? 'disabled=' + retry.disabled : '找不到');
+  } catch (error) {
+    check('员工账号页能渲染', false, error.message);
+  }
+
+  /* 4. 派任务页 */
+  try {
+    teamWin.showPage('assign');
+    check('派任务页能渲染', true);
+    check('派任务页有提交按钮',
+      !!teamDoc.getElementById('btn-assign-submit'));
+
+    /* **用户反馈"给别人发任务，结果发到自己员工号上"，
+       根因就在这个下拉里。**
+
+       重建下拉后如果旧的选中值不在新列表里，
+       `select.value = current` 不生效 → 浏览器自动回到第一项
+       → 静默派错人。所以这里检查：
+         · 有员工时，重建后选中值必须为空（强制重选），
+           而不是悄悄变成第一个人 */
+    const select = teamDoc.getElementById('assign-employee');
+    check('派任务页有人员下拉', !!select);
+    if (select) {
+      const optionCount = select.querySelectorAll('option').length;
+      /* 这个测试环境里没有真实员工账号，所以是"先建员工账号"那种占位项。
+         占位项的 value 是空字符串——**绝不能是一个会匹配到别人的 id**。 */
+      check('没有员工时下拉是占位项（value 为空）',
+        optionCount === 1 && select.value === '',
+        '选项 ' + optionCount + ' 个，value=' + JSON.stringify(select.value));
+    }
+  } catch (error) {
+    check('派任务页能渲染', false, error.message);
+  }
+
+  /* 5. 老板的「我的」页 —— 用户反馈"退出账号功能难找"就是这里 */
+  try {
+    /* 底部导航应当有「我的」这一项 */
+    const navMe = teamDoc.querySelector('#nav-boss [data-page="me"]');
+    check('老板底部导航有「我的」', !!navMe);
+    if (navMe) {
+      check('「我的」文字正确', navMe.textContent.trim() === '我的',
+        navMe.textContent.trim());
+    }
+    /* 底部导航一共四项 */
+    const bossButtons = teamDoc.querySelectorAll('#nav-boss button');
+    check('老板底部导航是 4 项', bossButtons.length === 4,
+      '实际 ' + bossButtons.length + ' 项：'
+      + Array.from(bossButtons).map(b => b.textContent.trim()).join('/'));
+
+    teamWin.showPage('me');
+    const meVisible = !teamDoc.getElementById('page-me')
+      .classList.contains('hidden');
+    check('「我的」页能显示', meVisible);
+
+    /* 退出登录按钮必须存在、可见、可点 */
+    const logoutBtn = teamDoc.getElementById('btn-me-logout');
+    check('「我的」页有退出登录按钮', !!logoutBtn);
+    if (logoutBtn) {
+      check('退出按钮文字是「退出登录」',
+        logoutBtn.textContent.trim() === '退出登录',
+        logoutBtn.textContent.trim());
+      check('退出按钮有 onclick',
+        typeof logoutBtn.onclick === 'function');
+      const rect = logoutBtn.getBoundingClientRect();
+      check('退出按钮有尺寸（没被隐藏）',
+        rect.width > 0 && rect.height > 0,
+        Math.round(rect.width) + 'x' + Math.round(rect.height));
+    }
+
+    /* 老板专有的入口。
+
+       **「云服务设置」不在这里了**——服务器是预置的，
+       界面上摆个"云服务设置"按钮，别人只会问"云服务是什么"。
+       改成**长按资料卡片**才出来（只有知道的人会用）。
+       测的是"按钮确实不在了 + 卡片上有手势入口"。 */
+    check('「我的」页不再显示云服务设置按钮',
+      !teamDoc.getElementById('btn-me-cloud'));
+    const meCard = teamDoc.getElementById('me-card');
+    check('资料卡片有 id（长按入口挂在它上面）', !!meCard);
+    check('有切换主题入口', !!teamDoc.getElementById('btn-me-theme'));
+    check('有管理员工账号入口', !!teamDoc.getElementById('btn-me-accounts'));
+
+    /* **账号管理三项，两种身份都要有。**
+
+       以前账号相关的功能都在 SQL 里（改手机号、改密码、注销），
+       手机上办不到。这三项是补上的出口。 */
+    ['btn-me-password', 'btn-me-login', 'btn-me-delete'].forEach(id => {
+      const node = teamDoc.getElementById(id);
+      check('「我的」页有 ' + id, !!node);
+      if (node) {
+        check(id + ' 有 onclick', typeof node.onclick === 'function');
+      }
+    });
+  } catch (error) {
+    check('老板「我的」页检查', false, error.message);
+  }
+
+  /* 6. 员工导航也该有「我的」 */
+  try {
+    const staffNavMe = staffDoc.querySelector('#nav-staff [data-page="me"]');
+    check('员工底部导航也有「我的」', !!staffNavMe);
+    const staffButtons = staffDoc.querySelectorAll('#nav-staff button');
+    check('员工底部导航是 2 项', staffButtons.length === 2,
+      '实际 ' + staffButtons.length + ' 项');
+    /* 页面 id 两边共用，不能再有 page-staff-me */
+    check('旧的 page-staff-me 已经不存在',
+      !staffDoc.getElementById('page-staff-me'));
+  } catch (error) {
+    check('员工导航检查', false, error.message);
+  }
+
+  log('');
+  log('--- 完成 ---');
+}
+</script>
+</body>
+</html>

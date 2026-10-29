@@ -1,0 +1,36 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---------- 打包产物（用 GitHub Releases 发，不进仓库）----------
+build/
+dist/
+*.pkg
+
+# ---------- 运行时数据（数据库/日志不进仓库）----------
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+logs/
+*.log
+
+# ---------- 移动端 ----------
+mobile/node_modules/
+mobile/.gradle/
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/android/build/
+mobile/_avatar_debug/
+*.apk
+*.aab
+
+# ---------- 编辑器 / 系统 ----------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

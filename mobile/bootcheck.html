@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>启动自检（开发用，不进 apk）</title>
+<style>
+  body { font-family: Consolas, monospace; font-size: 13px; padding: 16px;
+         background: #fff; color: #111; margin: 0; }
+  .pass { color: #1a7f37; font-weight: bold; }
+  .fail { color: #b42318; font-weight: bold; }
+  h1 { font-size: 16px; margin: 0 0 10px; }
+  pre { background: #f6f8fa; padding: 10px; border-radius: 6px;
+        white-space: pre-wrap; line-height: 1.5; }
+  iframe { width: 360px; height: 700px; border: 1px solid #ccc; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>启动自检结果</h1>
+<div id="out">运行中…</div>
+<iframe id="app" src="index.html"></iframe>
+
+<script>
+(function () {
+  const lines = [];
+  let failed = 0;
+
+  function check(label, condition, detail) {
+    if (condition) { lines.push('PASS  ' + label); }
+    else {
+      failed += 1;
+      lines.push('FAIL  ' + label + (detail ? '  —— ' + detail : ''));
+    }
+  }
+  function render() {
+    document.getElementById('out').innerHTML = (failed
+      ? '<p class="fail">失败 ' + failed + ' 项</p>'
+      : '<p class="pass">全部通过</p>')
+      + '<pre>' + lines.join('\n') + '</pre>';
+  }
+
+  const frame = document.getElementById('app');
+  frame.addEventListener('load', () => {
+    setTimeout(() => {
+      let win = null;
+      try { win = frame.contentWindow; } catch (e) { /* 跨域 */ }
+      if (!win) { check('拿到 iframe window', false, '跨域'); render(); return; }
+
+      /* DB 是 let 声明的，**不是 window 属性**，必须用 eval
+         在 iframe 自己的作用域里读 */
+      const read = code => {
+        try { return frame.contentWindow.eval(code); }
+        catch (error) { return { __err: error.message }; }
+      };
+
+      const bootError = win.document.getElementById('boot-error');
+      const bootText = bootError ? bootError.textContent.trim() : '';
+      check('没有启动错误横幅',
+        !bootError || bootError.classList.contains('hidden') || !bootText,
+        bootText.slice(0, 300));
+
+      ['loadAll', 'renderDash', 'showPage', 'renderLogin', 'renderTasks',
+       'renderMe', 'renderStaff', 'syncStatus', 'loginCodeToEmail',
+       'allWorklogs', 'fetchWorklogs', 'drawTrend', 'drawBars',
+       'drawTimeline', 'todayHabitRows', 'queueChange', 'completeTask',
+       'assignTask', 'cloudLogin', 'startSyncLoop', 'pushQueue',
+       'syncStaffAccounts'].forEach(name => {
+        check('函数存在：' + name, typeof win[name] === 'function');
+      });
+
+      check('supabase 库已加载', typeof win.supabase !== 'undefined');
+
+      const db = read(`(function () {
+        if (!DB) return null;
+        return { queue: Array.isArray(DB.syncQueue), tasks: Array.isArray(DB.tasks),
+                 logs: Array.isArray(DB.taskLogs),
+                 remote: Array.isArray(DB.remoteWorklogs),
+                 staff: Array.isArray(DB.staffAccounts),
+                 cursor: DB.syncCursor && typeof DB.syncCursor === 'object',
+                 profile: DB.profile === null ? 'null' : typeof DB.profile };
+      })()`);
+      check('能读到 DB', db && !db.__err, JSON.stringify(db));
+      if (db && !db.__err) {
+        check('syncQueue 是数组', db.queue === true);
+        check('tasks 是数组', db.tasks === true);
+        check('taskLogs 是数组', db.logs === true);
+        check('remoteWorklogs 是数组', db.remote === true);
+        check('staffAccounts 是数组', db.staff === true);
+        check('syncCursor 是对象', db.cursor === true);
+        check('profile 初始为 null', db.profile === 'null');
+      }
+
+      const pages = ['login', 'dash', 'project', 'tasks', 'team', 'assist',
+                     'assign', 'staff', 'me'];
+      let visible = [];
+      pages.forEach(name => {
+        const node = win.document.getElementById('page-' + name);
+        if (!node) { check('页面存在：' + name, false, '找不到'); return; }
+        if (!node.classList.contains('hidden')) visible.push(name);
+      });
+      check('恰好一个页面可见', visible.length === 1, '可见 ' + visible.join(','));
+
+      /* 没登录时必须停在登录页——**这里以前会直接进看板**，
+         导致用户装了之后完全看不到账号功能，以为没做。 */
+      check('未登录时停在登录页', visible[0] === 'login',
+        '实际停在 ' + visible[0]);
+
+      /* 登录页的元素。 */
+      ['login-code', 'login-password', 'btn-login',
+       'login-resume', 'login-cloud', 'login-error', 'btn-forgot',
+       'btn-register-boss', 'login-role'].forEach(id => {
+        check('登录元素存在：' + id, !!win.document.getElementById(id));
+      });
+
+      /* **登录页上不该出现的三样。**
+
+         用户明确要求去掉登录页的这几块：
+           · 「员工不用注册…」那句说明
+           · 「云服务设置」按钮（地址有预置值，手机上不用填）
+           · 「先不登录，只用本机功能」按钮
+         本机模式本身还在（不登录照样能用），只是不再摆按钮强调。 */
+      ['btn-offline', 'btn-cloud-settings', 'login-hint'].forEach(id => {
+        check('登录页已经没有：' + id,
+          !win.document.getElementById(id));
+      });
+
+      try {
+        const s = win.syncStatus();
+        check('syncStatus() 可用', s && typeof s === 'object');
+        check('未配置时 enabled=false', s.enabled === false);
+        check('hasLibrary=true', s.hasLibrary === true);
+      } catch (error) { check('syncStatus()', false, error.message); }
+
+      pages.forEach(name => {
+        try { win.showPage(name); check('渲染 ' + name + ' 不抛错', true); }
+        catch (error) { check('渲染 ' + name + ' 不抛错', false, error.message); }
+      });
+
+      try {
+        check('工号→邮箱', win.loginCodeToEmail('A001', true) === 'a001@staff.pr');
+        check('手机号→邮箱',
+          win.loginCodeToEmail('13800138000', false) === '13800138000@boss.pr');
+      } catch (error) { check('邮箱转换', false, error.message); }
+
+      const logic = read(`(function () {
+        saveSyncConfig('', '');
+        queueChange('tasks', 'insert', 'k1', { id: 'k1', v: 1 });
+        queueChange('tasks', 'insert', 'k1', { id: 'k1', v: 2 });
+        var len1 = DB.syncQueue.length, last = DB.syncQueue[0].payload.v;
+        resetSyncState();
+        return { len1: len1, last: last, len2: DB.syncQueue.length };
+      })()`);
+      check('队列去重', logic.len1 === 1, '长度 ' + logic.len1);
+      check('保留最后一次', logic.last === 2);
+      check('重置清空队列', logic.len2 === 0);
+
+      try {
+        check('allWorklogs 返回数组', Array.isArray(win.allWorklogs()));
+        check('todayHabitRows 可用', Array.isArray(win.todayHabitRows()));
+        check('loadRows 可用', Array.isArray(win.loadRows().rows));
+      } catch (error) { check('统计函数', false, error.message); }
+
+      render();
+    }, 700);
+  });
+})();
+</script>
+</body>
+</html>

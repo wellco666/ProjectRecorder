@@ -1,0 +1,12 @@
+{
+  "appId": "com.cj.projectrecorder",
+  "appName": "项目记录器",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": false
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

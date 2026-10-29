@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手机版界面预览</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 22px;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    background: #eceef1; color: #2f3540; font-size: 14px;
+  }
+  .head {
+    display: flex; align-items: center; gap: 14px;
+    flex-wrap: wrap; margin-bottom: 6px;
+  }
+  h1 { font-size: 19px; margin: 0; }
+  .note { color: #6b7481; font-size: 13px; line-height: 1.7; margin-bottom: 16px; }
+  .note b { color: #2f3540; }
+
+  .switch {
+    display: inline-flex; border: 1px solid #ccd2da;
+    border-radius: 8px; overflow: hidden; background: #fff;
+  }
+  .switch button {
+    border: none; background: transparent; cursor: pointer;
+    padding: 7px 16px; font-size: 13px; font-family: inherit;
+    color: #4d5563;
+  }
+  .switch button.on { background: #7c93ad; color: #fff; font-weight: 600; }
+
+  .grid { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
+  .frame { text-align: center; }
+  .frame .label {
+    font-size: 12px; color: #6b7481; margin-bottom: 6px; font-weight: 600;
+  }
+  /* 手机屏幕比例。iframe 里就是真实的手机版页面 */
+  .phone {
+    width: 300px; height: 600px;
+    border: 1px solid #d8dce2; border-radius: 14px;
+    background: #fff; overflow: hidden;
+    box-shadow: 0 2px 10px rgba(40, 50, 70, .08);
+  }
+  .phone iframe { width: 100%; height: 100%; border: 0; display: block; }
+
+  .tips {
+    margin-top: 20px; padding: 14px 16px; background: #fff;
+    border: 1px solid #e3e6ea; border-radius: 10px;
+    font-size: 13px; color: #4d5563; line-height: 1.8;
+  }
+  .tips b { color: #1b2028; }
+  code {
+    background: #eef1f4; padding: 1px 5px; border-radius: 4px;
+    font-family: Consolas, monospace; font-size: 12.5px;
+  }
+</style>
+</head>
+<body>
+  <div class="head">
+    <h1>手机版界面预览</h1>
+    <div class="switch">
+      <button data-theme="light" class="on">浅色</button>
+      <button data-theme="dark">深色</button>
+    </div>
+  </div>
+  <div class="note">
+    这三个框里跑的是<strong>真实的手机版代码</strong>（<code>index.html</code> 加那几个 js/css），
+    不是画的图。切换深浅色会直接调用页面里的 <code>applyTheme()</code>。<br>
+    <b>预览里没有数据</b>——所以首屏是空状态。要看你自己的数据，
+    就直接在浏览器里打开 <code>index.html</code>，那里读的是同一份 localStorage。
+  </div>
+
+  <div class="grid">
+    <div class="frame">
+      <div class="label">看板（空状态 + 立绘）</div>
+      <div class="phone"><iframe src="index.html" data-page="dash"></iframe></div>
+    </div>
+    <div class="frame">
+      <div class="label">小助手（空状态 + 立绘）</div>
+      <div class="phone"><iframe src="index.html" data-page="assist"></iframe></div>
+    </div>
+    <div class="frame">
+      <div class="label">团队（负荷图）</div>
+      <div class="phone"><iframe src="index.html" data-page="team"></iframe></div>
+    </div>
+  </div>
+
+  <div class="tips">
+    <b>这次改的：</b><br>
+    · 头像背景不再是"真透明"，而是铺了一层很浅的底色
+      （<code>BACKDROP_BLEND_FACE = 0.86</code>）——<b>深色下脸不会发黑</b><br>
+    · 立绘的底色更淡（<code>0.30</code>），保留边缘羽化的通透感<br>
+    · 深色滤镜从 <code>brightness(.94) contrast(1.06)</code> 减到
+      <code>(.97)(1.02)</code>，之前压过头了<br><br>
+    <b>看不出来的话说明这么改是对的。</b>如果深色下头像那圈浅底显得太白、
+    太跳，告诉我——把 <code>BACKDROP_BLEND_FACE</code> 从 0.86 往下调
+    （比如 0.7）就行，改一个数字，不用动别的。
+  </div>
+
+<script>
+/* 把每个 iframe 切到指定页面，并同步主题。
+   iframe 里是真实的手机版，所以这里做的是"模拟用户点击"：
+   点底部导航切页面、点菜单里的"切换主题"改配色。 */
+(function () {
+  const frames = Array.from(document.querySelectorAll(".phone iframe"));
+
+  function setTheme(theme) {
+    frames.forEach(frame => {
+      try {
+        const win = frame.contentWindow;
+        if (!win || typeof win.applyTheme !== "function") return;
+        win.applyTheme(theme);
+        /* 图表是 Canvas 画的，不重画就还是旧颜色 */
+        win.showPage(win.currentPageName());
+      } catch (error) {
+        /* 跨域被拦就跳过——预览还能用，只是主题不同步 */
+      }
+    });
+  }
+
+  function setPage(frame) {
+    try {
+      const win = frame.contentWindow;
+      const doc = frame.contentDocument;
+      if (!win || !doc || typeof win.showPage !== "function") return;
+      const wanted = frame.dataset.page;
+      const button = doc.querySelector('#nav button[data-page="' + wanted + '"]');
+      if (button) button.click();
+      else win.showPage(wanted);
+    } catch (error) { /* 同上 */ }
+  }
+
+  frames.forEach(frame => {
+    frame.addEventListener("load", () => {
+      setPage(frame);
+      const on = document.querySelector(".switch button.on");
+      if (on) setTheme(on.dataset.theme);
+    });
+  });
+
+  document.querySelectorAll(".switch button").forEach(button => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll(".switch button")
+        .forEach(item => item.classList.toggle("on", item === button));
+      setTheme(button.dataset.theme);
+    });
+  });
+})();
+</script>
+</body>
+</html>

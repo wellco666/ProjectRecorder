@@ -1,0 +1,1088 @@
+/* =============================================================
+   项目记录器 · 手机版样式
+
+   配色和桌面端一致（冷灰蓝 + 低饱和强调），但版式**重新设计**：
+   桌面那套九列表格塞进 400px 宽只会变成横向滚动的地狱。
+
+   尽量用系统字体、纯 CSS 圆角和 flex，不引外部字体或图标库——
+   打包成 apk 后没有网络，任何外链都会变成空白。
+   ============================================================= */
+
+:root {
+  --bg:          #f4f5f7;
+  --panel:       #ffffff;
+  --read:        #fafbfc;
+  --fg:          #2f3540;
+  --fg-strong:   #1b2028;
+  --fg-soft:     #4d5563;
+  --fg-dim:      #78828f;
+  --fg-faint:    #a2aab5;
+  --line:        #e3e6ea;
+  --line-soft:   #eceef1;
+  --accent:      #7c93ad;
+  --accent-dim:  #5f7893;
+  --accent-wash: #e9eef4;
+  --accent-edge: #b6c5d4;
+  --hover:       #eef1f4;
+  --ok:          #6f9a78;
+  --watch:       #c0a860;
+  --risk:        #c08457;
+  --severe:      #a8606a;
+  /* 进度环的底槽颜色。
+     运行时由 charts.js 的 applyThemeVariables() 按主题覆盖，
+     这里是**首屏兜底**：脚本还没跑到那一步时，
+     `conic-gradient(... var(--track) ...)` 不至于因为少一个颜色
+     整条声明失效。 */
+  --track:       #eceef1;
+  --nav-h:       58px;
+  --top-h:       54px;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg); color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+               "Noto Sans CJK SC", "Microsoft YaHei UI", sans-serif;
+  font-size: 15px; line-height: 1.6;
+  /* 防止 iOS 上整页橡皮筋滚动露白 */
+  overscroll-behavior-y: none;
+}
+
+.hidden { display: none !important; }
+.grow { flex: 1; min-width: 0; }
+.meta { font-size: 12.5px; color: var(--fg-dim); }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.right { text-align: right; }
+
+/* ---------------------------------------------------------- 启动错误 */
+.boot-error {
+  position: fixed; inset: 0; z-index: 999;
+  background: #f6e9e9; color: #6b3a3a;
+  padding: 40px 22px; font-size: 14px; line-height: 1.8;
+  white-space: pre-wrap; overflow: auto;
+}
+.boot-error b { display: block; font-size: 17px; margin-bottom: 12px; }
+
+/* ---------------------------------------------------------- 页面骨架 */
+.page {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  /* 每个页面自己滚，切页时滚动位置不串 */
+  overflow: hidden;
+}
+
+/* **切页时要"滑进来"，不能硬切。**
+
+   原来 .page 切换是瞬间显示/隐藏（.hidden 切 display），
+   感觉是"画面跳了一下"。
+
+   现在给 page 加一个入场动画：轻微上浮 + 淡入。
+   只动 transform / opacity——GPU 合成，不触发重排，
+   在安卓 WebView 里也不掉帧。
+
+   0.2 秒是手感上的甜点：再快看不出来，再慢会觉得卡。 */
+.page:not(.hidden) {
+  animation: page-in .2s cubic-bezier(.22, .61, .36, 1);
+}
+@keyframes page-in {
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+/* 卡片、区块依次浮上来（错开一点点，看起来像"长出来"而不是整块闪出）。
+   用 :nth-child 做延迟，不写 JS 也不用计时器。 */
+.body > * {
+  animation: rise-in .26s cubic-bezier(.22, .61, .36, 1) backwards;
+}
+.body > *:nth-child(1) { animation-delay: .02s; }
+.body > *:nth-child(2) { animation-delay: .06s; }
+.body > *:nth-child(3) { animation-delay: .10s; }
+.body > *:nth-child(4) { animation-delay: .14s; }
+.body > *:nth-child(5) { animation-delay: .17s; }
+.body > *:nth-child(n+6) { animation-delay: .19s; }
+@keyframes rise-in {
+  from { opacity: 0; transform: translate3d(0, 10px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+/* **系统设置里关了动画的人，一律不动。**
+   这是无障碍要求，也避免低端机上不必要的开销。 */
+@media (prefers-reduced-motion: reduce) {
+  .page:not(.hidden) { animation: none; }
+  .body > * { animation: none; }
+  .btn, .chip, .icon-btn { transition: none; }
+  .btn:active, .chip:active, .icon-btn:active { transform: none; }
+  .sheet-panel { animation: none; }
+  .toast { animation: none; }
+}
+
+.topbar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 10px;
+  min-height: var(--top-h);
+  padding: calc(8px + env(safe-area-inset-top)) 14px 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: relative; z-index: 5;
+}
+.topbar h1 {
+  margin: 0; font-size: 16.5px; font-weight: 600; color: var(--fg-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topbar .sub { font-size: 12px; color: var(--fg-dim); margin-top: 1px; }
+
+.body {
+  flex: 1 1 auto;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 14px 14px calc(20px + env(safe-area-inset-bottom));
+}
+
+/* 有底部导航的页面，多留出导航的高度 */
+.page.has-nav .body { padding-bottom: calc(var(--nav-h) + 20px); }
+
+.icon-btn {
+  flex: 0 0 auto;
+  min-width: 38px; height: 38px; padding: 0 10px;
+  background: transparent; border: none; border-radius: 10px;
+  color: var(--accent-dim); font-size: 15px; font-family: inherit;
+  cursor: pointer;
+  transform: translateZ(0);
+  transition: transform .13s cubic-bezier(.34, 1.56, .64, 1),
+              background-color .18s ease;
+  -webkit-tap-highlight-color: transparent;
+  will-change: transform;
+}
+.icon-btn:active { background: var(--hover); transform: scale(.9); }
+.icon-btn[data-back] { font-size: 22px; line-height: 1; padding: 0 8px; }
+
+/* ---------------------------------------------------------- 底部导航 */
+nav {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  display: flex;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+nav button {
+  flex: 1;
+  background: transparent; border: none; font-family: inherit;
+  padding: 11px 0 12px;
+  font-size: 13px; color: var(--fg-dim);
+  cursor: pointer; position: relative;
+  /* 底部导航是最常点的东西，反馈要最明显但不夸张 */
+  transform: translateZ(0);
+  transition: transform .14s cubic-bezier(.34, 1.56, .64, 1),
+              color .18s ease;
+  -webkit-tap-highlight-color: transparent;
+  will-change: transform;
+}
+nav button:active { transform: scale(.9); }
+nav button b { font-weight: 500; }
+nav button.on { color: var(--accent-dim); }
+nav button.on b { font-weight: 600; }
+nav button.on::before {
+  content: ""; position: absolute; top: 4px; left: 50%;
+  transform: translateX(-50%);
+  width: 22px; height: 3px; border-radius: 2px; background: var(--accent);
+  /* 顶部那条指示线"长出来"比瞬间出现舒服 */
+  animation: nav-bar-in .22s cubic-bezier(.34, 1.56, .64, 1);
+}
+@keyframes nav-bar-in {
+  from { transform: translateX(-50%) scaleX(.3); opacity: 0; }
+  to   { transform: translateX(-50%) scaleX(1); opacity: 1; }
+}
+
+/* 卡片可点的时候也给一点按下反馈 */
+.card.tap {
+  transform: translateZ(0);
+  transition: transform .13s cubic-bezier(.34, 1.56, .64, 1),
+              background-color .18s ease;
+}
+.card.tap:active { background: var(--hover); transform: scale(.985); }
+
+/* ---------------------------------------------------------- 卡片 */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+.card h3 { margin: 0 0 8px; font-size: 15.5px; font-weight: 600; color: var(--fg-strong); }
+.card-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.card-head h3 { margin: 0; }
+
+.section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 18px 2px 10px;
+  font-size: 13px; font-weight: 600; color: var(--fg-dim);
+}
+.section-head:first-child { margin-top: 4px; }
+
+.row { display: flex; align-items: center; gap: 8px; }
+.row + .row { margin-top: 4px; }
+.row .grow { flex: 1; min-width: 0; }
+
+/* ---------------------------------------------------------- 等级 / 状态 */
+.lv-健康 { color: var(--ok); }
+.lv-关注 { color: var(--watch); }
+.lv-风险 { color: var(--risk); }
+.lv-严重 { color: var(--severe); }
+
+.pill {
+  display: inline-block; flex: 0 0 auto;
+  padding: 2px 9px; border-radius: 10px;
+  font-size: 11.5px; font-weight: 600; color: #fff;
+  background: var(--fg-dim);
+}
+.pill-健康 { background: var(--ok); }
+.pill-关注 { background: var(--watch); }
+.pill-风险 { background: var(--risk); }
+.pill-严重 { background: var(--severe); }
+.pill-进行中, .pill-规划中 { background: var(--accent-dim); }
+.pill-已阻塞 { background: var(--severe); }
+.pill-已完成, .pill-已交付 { background: var(--ok); }
+.pill-已暂停, .pill-已取消 { background: var(--fg-dim); }
+.pill-高 { background: var(--severe); }
+.pill-中 { background: var(--watch); }
+.pill-低 { background: var(--fg-dim); }
+
+/* ---------------------------------------------------------- 进度条 */
+.bar {
+  height: 7px; border-radius: 4px; overflow: hidden;
+  background: var(--line-soft);
+}
+.bar > i { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
+.bar.ok > i { background: var(--ok); }
+.bar.risk > i { background: var(--risk); }
+.bar.severe > i { background: var(--severe); }
+
+/* ---------------------------------------------------------- 一行摘要 */
+/* 取代原来的四张指标卡。卡片占屏幕三分之一，
+   而里面的数字和下面的列表是同一份信息——首屏该留给要看的东西。 */
+.summary {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0;
+  padding: 9px 2px 2px;
+  font-size: 13px; color: var(--fg-soft);
+}
+.summary i {
+  font-style: normal; color: var(--fg-faint);
+  margin: 0 8px;
+}
+.summary b { font-weight: 600; color: var(--fg-strong); }
+.summary b.hot { color: var(--risk); }
+
+/* ---------------------------------------------------------- 项目卡片（瘦身版） */
+/* 只留「名字 + 等级 + 进度 + 负责人 + 一句话结论」。
+   步骤数、预算、阻塞数都挪进详情页——那里有更完整的呈现，
+   列表里重复显示只会让每张卡变高。
+   结果：一屏能看的项目从 3 个变成 5~6 个。 */
+.pj { padding: 11px 13px; margin-bottom: 9px; }
+
+.pj-top {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 7px;
+}
+.pj-name {
+  flex: 1; min-width: 0;
+  font-size: 15px; font-weight: 600; color: var(--fg-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pj-top .pill { padding: 1px 8px; font-size: 11px; }
+
+/* 进度条和百分比同一行，省掉一整行 */
+.pj-line { display: flex; align-items: center; gap: 8px; }
+.pj-line .bar { flex: 1; height: 6px; }
+.pj-pct {
+  flex: 0 0 auto; min-width: 34px; text-align: right;
+  font-size: 12px; font-weight: 600; color: var(--fg-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.pj-meta {
+  margin-top: 5px;
+  font-size: 12px; color: var(--fg-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 结论用左竖线标出来，和上面的数据行分开——
+   不用横线（那会让卡片显得更碎） */
+.pj-note {
+  margin-top: 7px; padding-left: 8px;
+  border-left: 2px solid var(--accent-edge);
+  font-size: 12.5px; color: var(--fg-soft); line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ---------------------------------------------------------- 预测结论 */
+.advice {
+  background: var(--read); border: 1px solid var(--line);
+  border-radius: 12px; padding: 14px;
+}
+.advice .head { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+.advice .r { font-size: 13.5px; color: var(--fg-soft); line-height: 1.75; }
+.advice .a { font-size: 13.5px; color: var(--accent-dim); line-height: 1.75; margin-top: 10px; }
+
+/* ---------------------------------------------------------- 列表 */
+.list-item { padding: 11px 0; border-bottom: 1px solid var(--line-soft); }
+.list-item:last-child { border-bottom: none; }
+.list-item.tap:active { background: var(--hover); }
+.list-item .title { font-weight: 600; color: var(--fg); }
+
+/* ---------------------------------------------------------- 按钮 */
+.btn {
+  display: block; width: 100%;
+  padding: 13px; border: none; border-radius: 10px;
+  background: var(--accent); color: #fff;
+  font-size: 15px; font-weight: 600; font-family: inherit;
+  cursor: pointer;
+  /* **按下去要"有反应"。**
+
+     原来是 `:active { background: ... }`——只换颜色，
+     手感上是"颜色变了"而不是"按下去了"。
+
+     改成缩放 + 过渡：
+       · transform: scale(.97)  手指按下去时按钮稍微缩一点
+       · cubic-bezier(.34,1.56,.64,1)  回弹曲线（超过 1 会略微过冲）
+       · 只动 transform/opacity，GPU 合成，WebView 里也稳 60fps
+
+     will-change 让浏览器提前把这一层提出来，避免第一次按时掉帧。 */
+  transform: translateZ(0);
+  transition: transform .13s cubic-bezier(.34, 1.56, .64, 1),
+              background-color .18s ease,
+              border-color .18s ease,
+              color .18s ease,
+              box-shadow .18s ease;
+  -webkit-tap-highlight-color: transparent;
+  will-change: transform;
+}
+.btn:active { background: var(--accent-dim); transform: scale(.968); }
+.btn:disabled { background: #c6ccd4; transform: none; }
+/* 禁用的按钮不给按下反馈——它本来就点不动 */
+.btn:disabled:active { transform: none; }
+.btn.ghost {
+  background: transparent; color: var(--accent-dim);
+  border: 1px solid var(--accent-edge);
+}
+.btn.ghost:active { background: rgba(0, 0, 0, .035); }
+.btn.danger { background: transparent; color: var(--severe); border: 1px solid #ddbfbf; }
+.btn.danger:active { background: #f6e9e9; transform: scale(.968); }
+
+.btn-row { display: flex; gap: 8px; margin-top: 14px; }
+.btn-row .btn { margin: 0; }
+
+.chip {
+  padding: 7px 13px; border-radius: 16px;
+  background: var(--panel); border: 1px solid var(--line);
+  color: var(--fg-soft); font-size: 13px; font-family: inherit;
+  cursor: pointer;
+  /* 身份切换那种小按钮，缩得更明显一点才"跟手" */
+  transform: translateZ(0);
+  transition: transform .13s cubic-bezier(.34, 1.56, .64, 1),
+              background-color .18s ease,
+              border-color .18s ease,
+              color .18s ease;
+  -webkit-tap-highlight-color: transparent;
+  will-change: transform;
+}
+.chip:active { background: var(--hover); transform: scale(.94); }
+.chip.solid {
+  background: var(--accent-wash); border-color: var(--accent-edge);
+  color: var(--accent-dim); font-weight: 600;
+}
+
+/* **选中态：`.on` 和 `.solid` 都要有样式。**
+
+   代码里两种写法都在用：
+     · `class="chip solid"`  ——  写死在模板里的实心按钮
+     · `class="chip on"`     ——  由状态切换出来的选中项
+                                  （登录页「我是老板/我是员工」、
+                                   通知开关那一排、工作日选择）
+
+   但 CSS 里原来只写了 `.chip.solid`，**`.chip.on` 一条都没有**。
+   于是那些用 `.on` 的地方：
+
+     · 登录页选了角色，两个按钮看起来一模一样，看不出选了哪个
+     · 通知开关那一排，开着和关着长得一样，**用户不知道自己关了什么**
+
+   把 `.on` 补成和 `.solid` 同样的样子。
+
+   ## 动效
+
+   光有颜色还不够 —— 手指按下去没有任何反馈会让人怀疑"点上了吗"。
+   所以：按下缩小、选中略微抬起并带一圈阴影。
+   两者都只改 transform / box-shadow，不触发重排，老 WebView 也跟得上。 */
+.chip.on,
+.chip.solid {
+  background: var(--accent-wash); border-color: var(--accent-edge);
+  color: var(--accent-dim); font-weight: 600;
+  box-shadow: 0 1px 2px rgba(70, 110, 160, .16);
+}
+
+/* 选中后按下去：比普通按下更明显一点，回弹也更干脆 */
+.chip.on:active {
+  background: var(--accent-edge);
+  transform: scale(.92);
+}
+
+/* ---- 主按钮 ---- */
+/* 大按钮同样要有"按到了"的感觉。0.97 比 0.9 稳，
+   抖得太厉害反而显得廉价。 */
+.btn {
+  transition: transform .12s cubic-bezier(.34, 1.56, .64, 1),
+              filter .15s ease;
+  will-change: transform;
+}
+.btn:active:not(:disabled) { transform: scale(.97); filter: brightness(.95); }
+
+/* 次要按钮按下去只用底色变化，不缩 —— 它本来就比主按钮轻 */
+.btn.ghost:active:not(:disabled) { transform: none; background: var(--hover); }
+
+/* 图标按钮（返回箭头、铃铛、⋯）按下缩小 */
+.icon-btn {
+  transition: transform .12s cubic-bezier(.34, 1.56, .64, 1),
+              background-color .15s ease;
+}
+.icon-btn:active { transform: scale(.9); background: var(--hover); }
+
+/* ---------------------------------------------------------- 表单 */
+label {
+  display: block; margin: 13px 0 5px;
+  font-size: 13px; font-weight: 600; color: var(--fg-soft);
+}
+label:first-child { margin-top: 0; }
+input, select, textarea {
+  width: 100%; padding: 11px 12px;
+  font-size: 16px; font-family: inherit;   /* 16px 以下 iOS 会自动放大页面 */
+  color: var(--fg); background: #fff;
+  border: 1px solid var(--line); border-radius: 9px;
+  -webkit-appearance: none; appearance: none;
+}
+select {
+  /* 自绘一个下拉箭头，免得各系统默认样式差太多 */
+  background-image: linear-gradient(45deg, transparent 50%, var(--fg-dim) 50%),
+                    linear-gradient(135deg, var(--fg-dim) 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 34px;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none; border-color: var(--accent-edge);
+}
+textarea { resize: vertical; min-height: 74px; }
+.hint { font-size: 12.5px; color: var(--fg-dim); margin-top: 6px; line-height: 1.6; }
+.row2 { display: flex; gap: 10px; }
+.row2 > * { flex: 1; min-width: 0; }
+
+/* ---------------------------------------------------------- 提示条 */
+.banner {
+  padding: 11px 14px; border-radius: 10px; font-size: 13.5px;
+  margin-bottom: 12px;
+  /* **长串必须能断行**。
+
+     中文默认不按单词断行，遇到一长串没空格的英文
+     （比如 Supabase 的 anon key、项目地址）会整段撑出屏幕。
+
+     `overflow-wrap: anywhere` 还允许盒子本身收缩到比内容更窄——
+     只写 break-word 的话盒子仍会先撑到内容宽度再换行，
+     在窄容器（比如我的 .body）里就会溢出。 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.banner.info { background: var(--accent-wash); color: var(--accent-dim); }
+.banner.warn { background: #f6f0e2; color: #8a6d2a; }
+.banner.bad  { background: #f6e9e9; color: #8a4a4a; }
+.banner.ok   { background: #e8f0ea; color: #3f6b4a; }
+
+.empty { padding: 34px 20px; text-align: center; color: var(--fg-dim); font-size: 14px; }
+
+/* ---------------------------------------------------------- 角色形象 */
+/* 用的是**原始贴纸**（白底 + 完整人物 + 文字），只做了缩放。
+   四周那圈白底交给这里的径向遮罩柔和化开，不做任何像素处理。
+
+   为什么不做去白底：
+     前面几版"去白底 + 描边"反复出问题——
+     按亮度判断会把脸也删掉（深色下脸发黑），
+     改成漫水填充后合成那步又用错 API（整图变纯白）。
+     **直接用原图 + 遮罩，零风险，而且想调柔和度只改 CSS。** */
+
+.sticker {
+  object-fit: contain;
+  flex: 0 0 auto;
+  /* 中心保持不透明，向外逐渐淡掉。
+     这样白底不会变成一个硬边方块，而是"化开"。
+     92% 处完全透明，保证四角干净。 */
+  -webkit-mask-image: radial-gradient(circle at 50% 50%,
+    #000 58%, rgba(0, 0, 0, .75) 74%, transparent 92%);
+  mask-image: radial-gradient(circle at 50% 50%,
+    #000 58%, rgba(0, 0, 0, .75) 74%, transparent 92%);
+}
+
+.hero-art { width: 108px; height: 108px; }
+.avatar-round { width: 40px; height: 40px; }
+.avatar-round.lg { width: 72px; height: 72px; }
+
+/* 深色主题下，白底在深色背景上会显出一圈很淡的光晕。
+   给一个柔和的浅色圆底衬托，让它看起来像"卡片上的插画"
+   而不是"没抠干净的白块"。
+   浅色主题不需要——那里背景本来就是浅色，白底是融进去的。 */
+[data-theme="dark"] .sticker {
+  background: radial-gradient(circle at 50% 50%,
+    rgba(255, 255, 255, .07) 0%, rgba(255, 255, 255, .03) 55%, transparent 78%);
+  border-radius: 50%;
+}
+
+/* 首屏头像行：立绘 + 一句话 */
+.hero-row {
+  display: flex; align-items: center;
+  gap: 2px; margin: 2px 0 4px;
+}
+.hero-line {
+  flex: 1; min-width: 0;
+  font-size: 13px; color: var(--fg-soft); line-height: 1.6;
+}
+
+/* ---------------------------------------------------------- 今日打卡 */
+/* 一排圆圈，横向滚动。点一下就打上，不弹窗口。
+
+   为什么用圆圈而不是复选框：
+     圆圈能承受"点一下变色"的反馈，而且能顺便画计量型的进度环。
+     复选框在手机上点起来太窄。 */
+
+.habit-block { margin: 2px 0 4px; }
+
+.habit-row {
+  display: flex; gap: 10px;
+  overflow-x: auto;
+  padding: 4px 2px 10px;
+  /* 惯性滚动：iOS 上生效，安卓 WebView 默认就有 */
+  -webkit-overflow-scrolling: touch;
+  /* 滚到边缘时不要让整页跟着弹，否则滑到最后一个习惯
+     很容易把页面也拽动 */
+  overscroll-behavior-x: contain;
+  /* 停下来时轻微吸附到圆圈上，感觉"有格"。用 proximity 不用
+     mandatory——强制吸附会让最后一个只露出一半的习惯很难滑到位。 */
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+
+  /* 两侧渐隐：暗示"还能往这边滑"。
+     只在两边有内容时才渐变，所以左边缘的遮罩方向是反的。 */
+  -webkit-mask-image: linear-gradient(to right,
+    transparent 0, #000 14px, #000 calc(100% - 18px), transparent 100%);
+  mask-image: linear-gradient(to right,
+    transparent 0, #000 14px, #000 calc(100% - 18px), transparent 100%);
+}
+.habit-row::-webkit-scrollbar { display: none; }
+
+.habit {
+  flex: 0 0 auto;
+  width: 62px;
+  border: none; background: transparent;
+  padding: 0; cursor: pointer;
+  font-family: inherit;
+  display: flex; flex-direction: column; align-items: center;
+  position: relative;
+  scroll-snap-align: start;
+  /* 长按会触发文字选择，那会打断长按手势，必须禁掉 */
+  -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
+  /* 按下时整体轻微缩小，抬手弹回。这是"可点"最直接的暗示。 */
+  transition: transform .16s cubic-bezier(.34, 1.56, .64, 1);
+}
+.habit:active { transform: scale(.93); }
+
+.habit-dot {
+  width: 46px; height: 46px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px; font-weight: 600;
+  color: var(--fg-dim);
+  background: var(--panel);
+  border: 1.5px solid var(--line);
+  /* 颜色 + 阴影一起过渡。cubic-bezier 带一点回弹，
+     让"填色"这个动作看起来是有生命的，而不是瞬间跳变。 */
+  transition: background .2s ease, border-color .2s ease,
+              color .2s ease, box-shadow .2s ease,
+              transform .2s cubic-bezier(.34, 1.56, .64, 1);
+  box-shadow: 0 1px 2px rgba(30, 40, 60, .05);
+}
+
+/* 已打卡：实心强调色 + 勾，并给一点内发光，看起来是"按下去"的 */
+.habit.done .habit-dot {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(124, 147, 173, .38),
+              inset 0 1px 0 rgba(255, 255, 255, .22);
+}
+
+/* 计量型：没达标时用 conic-gradient 画进度环。
+   --p 是百分比，由 app.js 算好传进来。 */
+.habit.qty .habit-dot {
+  background: conic-gradient(var(--accent) var(--p, 0%),
+                            var(--track) var(--p, 0%));
+  border-color: transparent;
+  /* 内圈留白，让 conic-gradient 看起来是环而不是实心饼 */
+  box-shadow: inset 0 0 0 4px var(--panel);
+  font-size: 14px;
+  color: var(--fg-soft);
+}
+.habit.qty.done .habit-dot {
+  background: var(--accent);
+  box-shadow: 0 2px 8px rgba(124, 147, 173, .38),
+              inset 0 1px 0 rgba(255, 255, 255, .22);
+  color: #fff;
+}
+
+/* 打卡瞬间的弹性动画。app.js 加上 .pop 类触发，340ms 后移除。
+   先放大到 1.16 再回到 1，带一点过冲——这是"手感"的来源。 */
+@keyframes habit-pop {
+  0%   { transform: scale(1); }
+  38%  { transform: scale(1.16); }
+  70%  { transform: scale(.97); }
+  100% { transform: scale(1); }
+}
+.habit-dot.pop { animation: habit-pop .34s cubic-bezier(.34, 1.56, .64, 1); }
+
+/* 刚打完卡：整个圆圈泛一下光，然后散去。
+   比只放大更耐看——放大只有一瞬，光晕会留一下。 */
+@keyframes habit-glow {
+  0%   { opacity: .55; transform: scale(.72); }
+  100% { opacity: 0;   transform: scale(1.5); }
+}
+.habit.just-done::after {
+  content: "";
+  position: absolute; top: 0; left: 50%;
+  width: 46px; height: 46px; margin-left: -23px;
+  border-radius: 50%;
+  background: var(--accent);
+  pointer-events: none;
+  animation: habit-glow .62s ease-out forwards;
+}
+
+.habit-name {
+  margin-top: 5px;
+  font-size: 11px; line-height: 1.25;
+  color: var(--fg-soft);
+  text-align: center;
+  display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+  word-break: break-all;
+  transition: color .2s ease;
+}
+.habit.done .habit-name { color: var(--fg); }
+
+/* 连续天数徽标。只在超过 1 天时显示——"连续 1 天"没有意义。 */
+.habit-streak {
+  position: absolute; top: -3px; right: 4px;
+  min-width: 18px; height: 18px; padding: 0 4px;
+  border-radius: 9px;
+  background: var(--risk); color: #fff;
+  font-size: 10px; font-weight: 600; line-height: 18px;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(168, 96, 106, .35);
+}
+
+/* 深色主题下把阴影换成"浅色轮廓"，否则深色上完全看不见边界 */
+[data-theme="dark"] .habit-dot {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+}
+[data-theme="dark"] .habit.done .habit-dot,
+[data-theme="dark"] .habit.qty.done .habit-dot {
+  box-shadow: 0 2px 10px rgba(142, 168, 196, .3),
+              inset 0 1px 0 rgba(255, 255, 255, .16);
+}
+
+/* 周期快捷按钮（习惯表单里） */
+.chip.wd { min-width: 46px; text-align: center; }
+.chip.wd.on {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+
+/* 用户在系统里开了「减弱动态效果」时，把所有动画去掉。
+   这不只是无障碍要求——晕动症用户看缩放和光晕会不舒服。
+   颜色变化（打卡变实心）保留，因为那是**信息**，不是装饰。 */
+@media (prefers-reduced-motion: reduce) {
+  .habit,
+  .habit-dot,
+  .habit-name { transition: none; }
+  .habit:active { transform: none; }
+  .habit-dot.pop { animation: none; }
+  .habit.just-done::after { animation: none; opacity: 0; }
+}
+
+/* ---------------------------------------------------------- 同步状态标签 */
+/* 顶栏上的小标签，让用户随时知道数据有没有传上去。
+
+   **这个必须有，而且要显眼**：员工勾完任务如果没传成功，
+   他会以为报上去了，老板那边什么都没收到。
+   这种"静默失败"靠提示气泡是发现不了的——气泡几秒就消失了，
+   而这个标签一直在。 */
+
+.sync-badge {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  background: var(--hover);
+  color: var(--fg-dim);
+}
+.sync-badge.ok   { background: #e8f0ea; color: #3f6b4a; }
+.sync-badge.warn { background: #f6efdc; color: #8a6d24; }
+/* 同步失败：用风险色，要能被一眼看到 */
+.sync-badge.bad  { background: #f7e4e6; color: #96424c; }
+.sync-badge.off  { background: var(--hover); color: var(--fg-faint); }
+
+/* 深色主题下这几种底色都要换，否则浅底在深色界面上很跳 */
+[data-theme="dark"] .sync-badge.ok   { background: #1f2a22; color: #8fbb99; }
+[data-theme="dark"] .sync-badge.warn { background: #2b2618; color: #d0bb78; }
+[data-theme="dark"] .sync-badge.bad  { background: #33222a; color: #d68b95; }
+
+/* ---------------------------------------------------------- 登录页 */
+/* 登录页**不显示底部导航**——还没登录，那些页面一个都进不去，
+   显示出来只会让人以为能点。
+
+   做法：app.js 在切到登录页时给 body 加 `.no-nav`。 */
+.no-nav nav { display: none; }
+
+.login-hero {
+  text-align: center;
+  padding: 14px 0 18px;
+}
+.login-hero .hero-art {
+  width: 128px; height: 128px;
+  margin: 0 auto 6px;
+  display: block;
+}
+.login-hero h1 { font-size: 20px; margin: 0 0 4px; }
+
+/* ---------------------------------------------------------- 记住的账号 */
+/* 登录页最上面那块：登录过的账号，点一下直接进。
+
+   整行可点（.saved-tap），右边单独一个 ✕ 拿来删。
+   因为一行里有两个不同的动作，所以不能把整行做成 <button>——
+   按钮套按钮在 HTML 里是非法的，WebView 上的行为也不一致。 */
+#login-saved { margin-bottom: 6px; }
+
+.saved-account {
+  display: flex; align-items: stretch; gap: 0;
+  border: 1px solid var(--line); border-radius: 11px;
+  background: var(--panel);
+  overflow: hidden;
+  margin-bottom: 7px;
+}
+
+.saved-tap {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 12px;
+  border: 0; background: none;
+  font-family: inherit; color: inherit;
+  text-align: left; cursor: pointer;
+}
+.saved-tap:active { background: var(--hover); }
+
+/* 身份徽标：老板实心、员工描边，一眼分得清 */
+.saved-avatar {
+  flex: 0 0 auto;
+  padding: 3px 8px; border-radius: 7px;
+  background: var(--accent-wash);
+  border: 1px solid var(--accent-edge);
+  color: var(--accent-dim);
+  font-size: 11px; font-weight: 600;
+  line-height: 1.5;
+}
+.saved-avatar.staff {
+  background: var(--panel);
+  border-color: var(--line);
+  color: var(--fg-dim);
+}
+
+.saved-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.saved-name {
+  font-size: 14px; font-weight: 600; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.saved-meta {
+  font-size: 11px; color: var(--fg-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.saved-go {
+  flex: 0 0 auto;
+  font-size: 12px; font-weight: 600; color: var(--accent-dim);
+}
+
+.saved-del {
+  flex: 0 0 auto;
+  width: 42px;
+  border: 0; border-left: 1px solid var(--line);
+  background: none;
+  color: var(--fg-faint);
+  font-size: 14px; font-family: inherit;
+  cursor: pointer;
+}
+.saved-del:active { background: #f7e4e6; color: #96424c; }
+
+/* 登录失败的原因显示在按钮上方，不要只弹一个气泡——
+   密码错和"没配云服务"是两回事，要让人分得清。 */
+.login-error {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: #f7e4e6;
+  color: #96424c;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+[data-theme="dark"] .login-error { background: #33222a; color: #d68b95; }
+
+/* 长串必须能断行。
+
+   比如 Supabase 的 anon key 是一百多个字符的连续串，
+   不断行的话会把卡片横向撑出屏幕——看着像"排版坏了"，
+   而且右边的内容全被挤出可视区。 */
+.banner,
+.login-error,
+.card,
+.hint,
+textarea,
+input {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* 底部导航里两组按钮的容器。
+   用 display:contents 让它自己不产生盒子，
+   按钮直接参与 nav 的布局——不影响原有样式。 */
+.nav-group { display: contents; }
+
+/* ---------------------------------------------------------- 通知 */
+/* 底部导航上的小红点。
+
+   数字标在「我的」上，不按类型分散到各个标签——
+   分散的话用户不知道该点哪一个。 */
+.nav-badge {
+  position: absolute;
+  top: 5px;
+  left: 50%;
+  margin-left: 3px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #d1495b;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  font-style: normal;
+  line-height: 17px;
+  text-align: center;
+  /* 描边用页面背景色，把红点从底图里"拎"出来，边缘不发毛 */
+  box-shadow: 0 0 0 2px var(--panel);
+  /* 出现时轻轻弹一下，不会"啪"地冒出来 */
+  animation: badge-pop .22s cubic-bezier(.34, 1.56, .64, 1);
+}
+@keyframes badge-pop {
+  from { transform: scale(.4); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+[data-theme="dark"] .nav-badge { background: #e06476; }
+
+/* 右上角铃铛上的小圆点（有未读时加 .has-dot） */
+.icon-btn.has-dot { position: relative; }
+.icon-btn.has-dot::after {
+  content: "";
+  position: absolute;
+  top: 6px; right: 6px;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #d1495b;
+}
+
+/* 页面顶部的通知条。可点，点开进通知中心。
+
+   **要显眼。**
+   用户反馈"UI 在里面，不容易看到"——原来它和普通提示条长得一样，
+   很容易被当成背景划过去。现在：图标 + 大字标题 + 「查看 ›」，
+   占满宽度、高亮背景，是页面上第一眼看到的东西。 */
+.notify-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: var(--accent-wash);
+  border: 1px solid var(--accent-edge);
+  border-left: 4px solid var(--accent);
+  border-radius: 12px;
+  cursor: pointer;
+  /* 出现时轻轻滑下来，比"啪"地冒出舒服 */
+  animation: notify-in .26s cubic-bezier(.22, .61, .36, 1);
+}
+@keyframes notify-in {
+  from { opacity: 0; transform: translate3d(0, -6px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+.notify-banner:active { opacity: .8; }
+.notify-icon { font-size: 20px; line-height: 1; flex: 0 0 auto; }
+.notify-text { flex: 1; min-width: 0; }
+.notify-text b {
+  display: block;
+  font-size: 14.5px; font-weight: 600;
+  color: var(--fg-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notify-body {
+  margin-top: 2px;
+  font-size: 12.5px; color: var(--fg-soft);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notify-more {
+  flex: 0 0 auto;
+  font-size: 12px; color: #fff;
+  background: var(--accent);
+  border-radius: 9px; padding: 1px 7px;
+}
+.notify-go {
+  flex: 0 0 auto;
+  font-size: 13px; font-weight: 600; color: var(--accent-dim);
+}
+
+/* 通知中心里的偏好开关 */
+#notify-prefs { flex-wrap: wrap; gap: 6px; }
+#notify-prefs .chip { font-size: 12.5px; }
+
+/* ---------------------------------------------------------- 图表 */
+.chart { display: block; width: 100%; height: auto; }
+
+/* ---------------------------------------------------------- 小助手 */
+.chat { display: flex; flex-direction: column; gap: 10px; padding-bottom: 8px; }
+
+/* 一行 = 头像 + 气泡。自己的消息不放头像（两边都放会显得乱），
+   所以用 row 的 me/bot 类控制对齐方向。 */
+.bubble-row { display: flex; align-items: flex-start; gap: 8px; }
+.bubble-row.me { justify-content: flex-end; }
+.bubble-row.bot { justify-content: flex-start; }
+.bubble-row .avatar-round { margin-top: 2px; }
+
+.bubble {
+  padding: 11px 14px; border-radius: 12px;
+  font-size: 14px; line-height: 1.7;
+  white-space: pre-wrap; word-break: break-word;
+}
+.bubble.me {
+  max-width: 84%;
+  background: var(--accent-wash); border: 1px solid var(--accent-edge);
+}
+.bubble.bot {
+  max-width: calc(100% - 48px);
+  background: var(--panel); border: 1px solid var(--line);
+}
+
+/* 空状态：整身立绘 + 说明。四周白底已被遮罩化开，所以看起来是
+   "浮"在页面上的插画，不是贴了一张方图。 */
+.assist-empty {
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 0 2px;
+}
+.assist-empty .hero-art { width: 112px; height: 112px; }
+.assist-empty .bubble { flex: 1; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; }
+.inputbar { display: flex; gap: 8px; margin-top: 12px; }
+.inputbar input { flex: 1; }
+.inputbar button {
+  flex: 0 0 auto; padding: 0 18px;
+  border: none; border-radius: 9px;
+  background: var(--accent); color: #fff;
+  font-size: 15px; font-weight: 600; font-family: inherit;
+  cursor: pointer;
+}
+
+/* ---------------------------------------------------------- 弹层 */
+.sheet { position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; }
+.sheet-bg { position: absolute; inset: 0; background: rgba(28, 32, 40, .38); }
+.sheet-panel {
+  position: relative; width: 100%;
+  max-height: 88vh;
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  border-radius: 16px 16px 0 0;
+  padding-bottom: env(safe-area-inset-bottom);
+  /* 弹层要"滑上来"，不是"跳出来"。0.24 秒 + 回弹曲线，
+     手感上像一块板子被推上来。 */
+  animation: sheet-up .24s cubic-bezier(.22, .61, .36, 1);
+}
+@keyframes sheet-up {
+  from { transform: translate3d(0, 22px, 0); opacity: .55; }
+  to   { transform: translate3d(0, 0, 0); opacity: 1; }
+}
+/* 背景遮罩跟着淡入，不然会"啪"地变暗 */
+.sheet-bg { animation: fade-in .24s ease-out; }
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.sheet-head {
+  flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 8px 10px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.sheet-head h2 { margin: 0; font-size: 16px; font-weight: 600; color: var(--fg-strong); }
+.sheet-body {
+  flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 16px 18px;
+}
+.sheet-foot {
+  flex: 0 0 auto; display: flex; gap: 8px;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--line);
+}
+.sheet-foot .btn { margin: 0; }
+
+/* ---------------------------------------------------------- 轻提示 */
+.toast {
+  position: fixed; left: 50%; bottom: calc(var(--nav-h) + 22px);
+  transform: translateX(-50%);
+  z-index: 90;
+  max-width: 86%;
+  padding: 10px 16px; border-radius: 10px;
+  background: rgba(29, 33, 40, .92); color: #fff;
+  font-size: 13.5px; line-height: 1.5; text-align: center;
+  /* 提示浮上来时带一点回弹，比直接淡入"活" */
+  animation: toast-in .22s cubic-bezier(.34, 1.56, .64, 1);
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translate(-50%, 10px) scale(.96); }
+  to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+
+/* 输入框聚焦时给一点反馈——点进去"亮一下"，
+   证明焦点确实在这个框里（手机上没有光标闪烁那么明显）。 */
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent-edge);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+
+/* ---------------------------------------------------------- 平板 / 横屏 */
+/* 屏幕宽了就把左右留白加大，不用 .grid2 了——
+   那套四张指标卡已经被一行摘要取代。 */
+@media (min-width: 620px) {
+  .body { padding-left: 22px; padding-right: 22px; }
+  /* 宽屏上项目卡片变成两列，一屏能看更多 */
+  #dash-list {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  #dash-list .pj { margin-bottom: 0; }
+}

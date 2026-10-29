@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>触摸事件诊断（开发用）</title>
+<style>
+  body { font-family: Consolas, monospace; font-size: 13px; padding: 12px; margin: 0; }
+  .pass { color: #1a7f37; } .fail { color: #b42318; font-weight: bold; }
+  pre { background: #f6f8fa; padding: 10px; white-space: pre-wrap; line-height: 1.5; }
+  iframe { width: 360px; height: 640px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>触摸事件诊断</h1>
+<pre id="out">运行中…</pre>
+<iframe id="app" src="index.html"></iframe>
+<script>
+/* =============================================================
+   这个页面原来测的是「我是老板 / 我是员工」那两个身份按钮的触摸响应。
+   但那排按钮**已经删掉了**（登录改成自动判断身份），
+   测试对象不存在了，整页都在测幽灵。
+
+   保留它、换成测**登录按钮**——那才是登录页上现在唯一要点的东西。
+   要验的仍然是同一件事：**手指点下去，事件到底有没有触发。**
+   ============================================================= */
+const lines = [];
+let failed = 0;
+const log = s => { lines.push(s); document.getElementById('out').innerHTML =
+  (failed ? '<span class="fail">失败 ' + failed + ' 项</span>'
+          : '<span class="pass">全部通过</span>')
+  + '<pre>' + lines.join('\n') + '</pre>'; };
+function check(label, cond, detail) {
+  if (cond) log('PASS  ' + label);
+  else { failed += 1; log('FAIL  ' + label + (detail ? '  —— ' + detail : '')); }
+}
+
+document.getElementById('app').addEventListener('load', () => {
+  setTimeout(() => {
+    const w = document.getElementById('app').contentWindow;
+    const d = w.document;
+
+    const button = d.getElementById('btn-login');
+    check('找到登录按钮', !!button);
+    if (!button) return;
+
+    /* 元素自身的状态 */
+    log('');
+    log('登录按钮: <' + button.tagName.toLowerCase() + '>');
+    log('  type        = ' + JSON.stringify(button.getAttribute('type')));
+    log('  onclick 已绑 = ' + (typeof button.onclick === 'function'));
+    log('  disabled    = ' + button.disabled);
+    log('  可见        = ' + (button.offsetParent !== null));
+    log('  尺寸        = ' + button.offsetWidth + 'x' + button.offsetHeight);
+
+    check('登录按钮有 onclick', typeof button.onclick === 'function');
+    check('登录按钮没被禁用', button.disabled === false);
+    check('登录按钮可见且有尺寸',
+      button.offsetWidth > 0 && button.offsetHeight > 0,
+      button.offsetWidth + 'x' + button.offsetHeight);
+
+    /* 有没有东西盖住它 */
+    const rect = button.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const top = d.elementFromPoint(cx, cy);
+    check('按钮没有被别的元素盖住',
+      top === button || button.contains(top),
+      '命中的是 ' + (top ? '<' + top.tagName.toLowerCase() + '> '
+        + top.className : 'null'));
+
+    /* **点下去要真的执行 doLogin。**
+       空表单点登录应当报"请填手机号或工号"——
+       这条既能证明事件触发了，也能证明处理函数是对的。 */
+    log('');
+    log('--- 模拟点击（空表单） ---');
+    const errorBox = d.getElementById('login-error');
+    errorBox.classList.add('hidden');
+    button.click();
+    /* doLogin 是 async，但空表单那条分支是同步返回的 */
+    const message = errorBox.textContent || '';
+    check('点了之后有反应（报了错）',
+      message.length > 0, JSON.stringify(message));
+    check('提示是要填手机号或工号',
+      message.indexOf('手机号') !== -1 || message.indexOf('工号') !== -1,
+      message);
+
+    /* 触摸序列不抛错（安卓 WebView 的真实路径） */
+    log('');
+    log('--- 触摸事件 ---');
+    try {
+      const touch = new Touch({ identifier: 1, target: button,
+        clientX: cx, clientY: cy });
+      ['touchstart', 'touchend'].forEach(type => {
+        button.dispatchEvent(new TouchEvent(type, {
+          bubbles: true, cancelable: true,
+          touches: type === 'touchend' ? [] : [touch],
+          changedTouches: [touch],
+        }));
+      });
+      check('触摸序列不抛错', true);
+    } catch (error) {
+      check('触摸序列不抛错', false, error.message);
+    }
+
+    log('');
+    log('--- 完成 ---');
+  }, 900);
+});
+</script>
+</body>
+</html>

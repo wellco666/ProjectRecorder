@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#7c93ad">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="项目记录器">
+<title>项目记录器</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============================================================
+     启动时如果用不了，这个横幅会显示出来。
+     手机上没法看 Console，所以错误必须显示在页面上——
+     否则用户只会看到一片空白，不知道发生了什么。
+     ============================================================ -->
+<div id="boot-error" class="boot-error hidden"></div>
+
+<!-- ====================== 登录 ====================== -->
+<!-- 这个页面在没登录时显示。**但有「先不登录」的出口**——
+     老用户升级后本机数据还在，不能被一个用不上的登录页挡住。 -->
+<section id="page-login" class="page hidden">
+  <div class="body">
+    <div class="login-hero">
+      <img class="hero-art sticker" src="icons/09_暗中观察@hero.webp" alt="">
+      <h1>项目记录器</h1>
+      <div class="meta">老板派任务，员工勾一下，工时自动汇总。</div>
+    </div>
+
+    <div id="login-cloud"></div>
+
+    <div class="card">
+      <!-- **身份要选。**
+
+           我一度把它删掉改成自动判断，但**老板和员工得能一眼分清**——
+           界面上摆着"我是老板 / 我是员工"，比一句"会自动认"清楚得多。
+
+           两件事都做：**默认按选的身份登**，同时留一层兜底——
+           选错了也还能登进去（先按选的试，不行按另一种试一次）。
+
+           这样既能一眼看出身份，又不会因为选错而登不上。 -->
+      <div class="chips" id="login-role">
+        <button class="chip on" data-role="boss">我是老板</button>
+        <button class="chip" data-role="employee">我是员工</button>
+      </div>
+
+      <div id="login-form">
+        <label for="login-code" id="login-code-label">手机号</label>
+        <input id="login-code" inputmode="text" autocomplete="username">
+        <label for="login-password">密码</label>
+        <input id="login-password" type="password"
+               autocomplete="current-password">
+        <div id="login-error" class="login-error hidden"></div>
+        <button class="btn" id="btn-login" style="width:100%;margin-top:14px">
+          登录</button>
+        <!-- 忘了密码的出路。不做这个入口的话，
+             员工忘了密码就只能去 SQL 里改——那是"死局"。 -->
+        <button class="btn ghost" id="btn-forgot"
+                style="width:100%;margin-top:8px">忘了密码</button>
+      </div>
+
+      <!-- 已经登录过：显示"继续使用"，不用重新输密码 -->
+      <div id="login-resume" class="hidden">
+        <div class="meta" style="padding:6px 0">
+          上次登录：<b id="login-resume-name"></b></div>
+        <button class="btn" id="btn-resume" style="width:100%;margin-top:8px">
+          继续使用</button>
+        <button class="btn ghost" id="btn-switch-account"
+                style="width:100%;margin-top:8px">换个账号</button>
+      </div>
+
+      <!-- 老板自助注册。
+
+           放在登录表单**下面**、样式是 ghost（次要按钮），
+           因为它只用一次。但必须在登录页上——不然新装的人
+           根本没法建自己的账号，只能去跑 SQL。 -->
+      <button class="btn ghost" id="btn-register-boss"
+              style="width:100%;margin-top:12px">
+        还没有账号？创建一个老板账号</button>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== 看板 ====================== -->
+<section id="page-dash" class="page hidden">
+  <div class="topbar">
+    <div>
+      <h1>项目记录器</h1>
+      <div class="sub" id="dash-sub">正在加载…</div>
+    </div>
+    <span class="sync-badge" id="sync-badge-dash"></span>
+    <!-- 通知入口。不只有底部导航一个入口——有人习惯点右上角。
+         有未读时这里会加一个小圆点（.has-dot）。 -->
+    <button class="icon-btn" id="btn-notify" title="通知">🔔</button>
+    <button class="icon-btn" id="btn-menu" title="更多">⋯</button>
+  </div>
+  <div class="body">
+    <!-- 通知提示条。有新消息时 renderNotifyBanner 会往里插内容，
+         平时是空的。 -->
+    <div id="notify-banner-dash"></div>
+    <div id="dash-banner"></div>
+    <!-- 角色形象 + 一句话。立绘边缘用 CSS 羽化（见 style.css 的 .hero-art），
+         所以这里放的是整张图，不是裁圆的脸。 -->
+    <div class="hero-row" id="dash-hero">
+      <img class="hero-art sticker" id="dash-hero-art" alt="">
+      <div class="hero-line" id="dash-hero-line"></div>
+    </div>
+    <!-- 一行摘要，不放四张卡：卡片占屏幕三分之一，
+         而里面的「在管项目 3」和下面的列表是同一份信息。
+         首屏要留给真正要看的项目列表。 -->
+    <div id="dash-stats" class="summary"></div>
+    <!-- 今日打卡。放在首屏靠上、工时趋势和项目列表之前：
+         习惯最大的敌人是"忘"，放得深等于没做。
+         一排圆圈横向滚动，点一下就打上。 -->
+    <div class="habit-block" id="habit-block">
+      <div class="section-head">
+        <span id="habit-title">今日打卡</span>
+        <button class="chip" id="btn-new-habit">+ 习惯</button>
+      </div>
+      <div class="habit-row" id="habit-row"></div>
+    </div>
+    <!-- 近两周工时折线。放在摘要下面、项目列表上面——
+         它是"整体节奏"的概览，看完再往下看具体项目。
+         高度写死在 dataset.h 里，由 charts.js 读取。 -->
+    <div class="card">
+      <div class="card-head"><h3>工时趋势</h3>
+        <span class="meta" id="dash-trend-range"></span></div>
+      <canvas id="trend-chart" class="chart" data-h="150"></canvas>
+    </div>
+    <div class="section-head">
+      <span>项目</span>
+      <button class="chip" id="btn-new-project">+ 新建</button>
+    </div>
+    <div id="dash-list"></div>
+  </div>
+</section>
+
+<!-- ====================== 项目详情 ====================== -->
+<section id="page-project" class="page hidden">
+  <div class="topbar">
+    <button class="icon-btn" data-back="dash">‹</button>
+    <div class="grow"><h1 id="pj-title">项目</h1><div class="sub" id="pj-sub"></div></div>
+    <button class="icon-btn" id="btn-edit-project">编辑</button>
+  </div>
+  <div class="body" id="pj-body"></div>
+</section>
+
+<!-- ====================== 团队 ====================== -->
+<section id="page-team" class="page hidden">
+  <div class="topbar">
+    <div class="grow"><h1>团队</h1><div class="sub" id="team-sub"></div></div>
+    <button class="icon-btn" id="btn-new-employee">+ 人</button>
+  </div>
+  <div class="body">
+    <!-- 老板的两个管理入口。
+
+         放在团队页最上面是有原因的：**之前这两个页面没有任何入口**，
+         代码写好了但点不进去，等于没做。
+         放在这里是因为「人」和「派活」都属于团队管理，
+         而且一进团队页就能看到。 -->
+    <div class="btn-row" style="margin-bottom:4px">
+      <button class="btn ghost" id="btn-goto-staff">员工账号</button>
+      <button class="btn ghost" id="btn-goto-assign">派任务</button>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>负荷</h3><span class="meta" id="load-range"></span></div>
+      <canvas id="load-chart" class="chart" height="200"></canvas>
+    </div>
+    <!-- 各项目工时投入。和上面的「按人负荷」是两个角度看同一批工时：
+         上面看"谁忙"，这里看"忙在哪个项目上"。 -->
+    <div class="card">
+      <div class="card-head"><h3>项目投入</h3>
+        <span class="meta" id="project-range"></span></div>
+      <canvas id="project-chart" class="chart"></canvas>
+    </div>
+    <div class="section-head"><span>工时</span>
+      <button class="chip" id="btn-new-worklog">+ 记一笔</button></div>
+    <div id="worklog-list"></div>
+  </div>
+</section>
+
+<!-- ====================== 小助手 ====================== -->
+<section id="page-assist" class="page hidden">
+  <div class="topbar">
+    <div class="grow"><h1>小助手</h1><div class="sub">本地判据，不联网</div></div>
+    <button class="icon-btn" id="btn-clear-chat">清空</button>
+  </div>
+  <div class="body">
+    <div class="chips" id="assist-chips"></div>
+    <div class="chat" id="chat"></div>
+    <div class="inputbar">
+      <input id="ask" aria-label="想问什么">
+      <button id="btn-ask">发送</button>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== 员工：今日任务 ====================== -->
+<!-- 员工端的主界面。**只有这一个页面**——员工不需要看项目、
+     看板、习惯，那些是老板的视角。 -->
+<section id="page-tasks" class="page hidden">
+  <div class="topbar">
+    <div class="grow">
+      <h1>今日任务</h1>
+      <div class="sub" id="tasks-sub"></div>
+    </div>
+    <span class="sync-badge" id="sync-badge-tasks"></span>
+    <button class="icon-btn" id="btn-task-notify" title="通知">🔔</button>
+    <button class="icon-btn" id="btn-task-menu" title="更多">⋯</button>
+  </div>
+  <div class="body">
+    <!-- 员工端的通知提示条。"老板派了新任务"就显示在这里，
+         比只在底部导航点个红点更容易被看到。 -->
+    <div id="notify-banner-tasks"></div>
+    <div id="tasks-list"></div>
+    <div id="tasks-history"></div>
+  </div>
+</section>
+
+<!-- ====================== 老板：派任务 ====================== -->
+<section id="page-assign" class="page hidden">
+  <div class="topbar">
+    <button class="icon-btn" data-back="team">‹</button>
+    <div class="grow"><h1>派任务</h1>
+      <div class="sub">员工勾选完成后自动报工时</div></div>
+  </div>
+  <div class="body">
+    <!-- 有员工还没在云端建号时，这里会提示一句 -->
+    <div id="assign-warn"></div>
+    <div class="card">
+      <label for="assign-employee">派给谁</label>
+      <select id="assign-employee"></select>
+      <label for="assign-title">任务内容 *</label>
+      <input id="assign-title">
+      <label for="assign-detail">补充说明（可选）</label>
+      <input id="assign-detail">
+      <div class="row2">
+        <div><label for="assign-date">日期</label>
+          <input id="assign-date" type="date"></div>
+        <div><label for="assign-hours">预估工时</label>
+          <input id="assign-hours" type="number" step="0.5" min="0"></div>
+      </div>
+      <label for="assign-project">关联项目（可选）</label>
+      <select id="assign-project"></select>
+      <button class="btn" id="btn-assign-submit"
+              style="width:100%;margin-top:14px">派发</button>
+    </div>
+    <div class="section-head"><span>这一天的任务</span></div>
+    <div class="card" id="assign-list"></div>
+  </div>
+</section>
+
+<!-- ====================== 老板：员工账号 ====================== -->
+<section id="page-staff" class="page hidden">
+  <div class="topbar">
+    <button class="icon-btn" data-back="team">‹</button>
+    <div class="grow"><h1>员工账号</h1>
+      <div class="sub">建好工号和密码给员工</div></div>
+    <button class="icon-btn" id="btn-new-staff">+ 账号</button>
+  </div>
+  <div class="body">
+    <div id="staff-list"></div>
+    <div class="card">
+      <!-- 这个按钮只在**当时没网**时有用：账号会先存在本机，
+           联网后点它补齐。有网时它会显示"全部已在云端生效"并禁用。
+           说明只在需要时由 JS 写进 #staff-retry-hint，不常驻页面。 -->
+      <button class="btn" id="btn-sync-staff" style="width:100%">
+        全部已在云端生效</button>
+      <div class="hint" id="staff-retry-hint" style="margin-top:8px"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== 员工：我的 ====================== -->
+<!-- 员工需要能看"我报过什么"和"同步到底成没成功"。
+     没有这个页面，员工会怀疑自己的记录有没有上去。 -->
+<!-- ====================== 我的（两种身份共用） ====================== -->
+<!-- **老板和员工共用这一个页面。**
+
+     原来只有员工有「我的」，老板的退出登录埋在
+     「看板 ⋯ → 更多」里，用户反馈"退出账号功能难找"。
+     把入口放到和员工一样的位置（底部导航最后一项），
+     两类人都不用找。
+
+     页面上哪些区块显示，由 renderMe() 按身份决定。 -->
+<section id="page-me" class="page hidden">
+  <div class="topbar">
+    <div class="grow"><h1>我的</h1>
+      <div class="sub" id="me-sub"></div></div>
+    <span class="sync-badge" id="sync-badge-me"></span>
+  </div>
+  <div class="body">
+    <!-- 长按这张卡片会打开「云服务设置」。
+         界面上不摆那个按钮（服务器是预置的，别人看不懂"云服务"），
+         但留一条路给"预置的失效了"这种情况。 -->
+    <div class="card" id="me-card">
+      <div class="row"><div class="grow meta">姓名</div>
+        <b id="me-name">—</b></div>
+      <div class="row" style="margin-top:6px">
+        <div class="grow meta" id="me-code-label">工号</div>
+        <b id="me-code">—</b></div>
+      <div class="row" style="margin-top:6px">
+        <div class="grow meta">身份</div><b id="me-role">—</b></div>
+      <div class="row" style="margin-top:6px">
+        <div class="grow meta">同步状态</div>
+        <b id="me-sync">—</b></div>
+      <div class="row" style="margin-top:6px">
+        <div class="grow meta">待上传</div><b id="me-pending">0 条</b></div>
+    </div>
+
+    <div id="me-notify-hint"></div>
+
+    <button class="btn" id="btn-sync-now" style="width:100%">立即同步</button>
+
+    <!-- 账号管理。**这两种身份都需要**，所以不放在 boss-extras 里。 -->
+    <div class="btn-row" style="margin-top:8px">
+      <button class="btn ghost" id="btn-me-password">修改密码</button>
+      <button class="btn ghost" id="btn-me-login">改登录名</button>
+    </div>
+
+    <!-- 只有老板需要：切主题、管员工。
+         **「云服务设置」不在这里**——服务器已经配好了，
+         摆出来别人看不懂（"云服务"是什么？）。
+         万一真需要改（换项目、地址失效），长按上面那张
+         资料卡片会弹出入口。 -->
+    <div id="me-boss-extras" class="hidden">
+      <button class="btn ghost" id="btn-me-theme"
+              style="width:100%;margin-top:8px">切换主题</button>
+      <button class="btn ghost" id="btn-me-accounts"
+              style="width:100%;margin-top:8px">管理员工账号</button>
+    </div>
+
+    <button class="btn danger" id="btn-me-logout"
+            style="width:100%;margin-top:16px">退出登录</button>
+
+    <!-- 注销账号。放在最下面、措辞最重——
+         它是**不可恢复**的操作，不该和"退出登录"混在一起。
+         详细后果在点开后的确认框里说，不摆在页面上。 -->
+    <button class="btn ghost" id="btn-me-delete"
+            style="width:100%;margin-top:12px;color:var(--watch)">
+      注销账号</button>
+  </div>
+</section>
+
+<!-- ====================== 底部导航 ====================== -->
+<!-- 两套导航，按身份显示。
+     员工只有两个入口——给他看一堆用不上的按钮只会让人困惑。 -->
+<nav id="nav">
+  <span id="nav-boss" class="nav-group">
+    <button data-page="dash" class="on"><b>看板</b></button>
+    <button data-page="team"><b>团队</b></button>
+    <button data-page="assist"><b>助手</b></button>
+    <button data-page="me" id="nav-me-boss"><b>我的</b></button>
+  </span>
+  <span id="nav-staff" class="nav-group hidden">
+    <button data-page="tasks"><b>任务</b></button>
+    <button data-page="me" id="nav-me-staff"><b>我的</b></button>
+  </span>
+</nav>
+
+<!-- ====================== 弹层：表单 / 菜单 ====================== -->
+<div id="sheet" class="sheet hidden">
+  <div class="sheet-bg" data-close="1"></div>
+  <div class="sheet-panel">
+    <div class="sheet-head">
+      <h2 id="sheet-title">表单</h2>
+      <button class="icon-btn" data-close="1">✕</button>
+    </div>
+    <div class="sheet-body" id="sheet-body"></div>
+    <div class="sheet-foot" id="sheet-foot"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<!-- ============================================================
+     加载顺序有讲究（下面的脚本按依赖排列）：
+
+       1. vendor/supabase.js  —— 云库，必须先到，sync.js 依赖它
+       2. store.js            —— 数据层，谁都依赖它
+       3. calc.js / charts.js / assist.js  —— 纯计算/绘图
+       4. sync.js             —— 云同步，依赖 store 和计算函数
+       5. account.js          —— 账号界面，依赖 sync
+       6. app.js              —— 主程序，最后加载并启动
+     ============================================================ -->
+<!-- 用假客户端顶掉真库：端到端测试要控制服务端响应 -->
+<script src="mock-supabase.js"></script>
+<script>
+  /* 云库没加载上不算致命：sync.js 里所有函数都会先检查
+     `typeof window.supabase === "undefined"` 然后安静返回，
+     所以本机功能（项目、工时、习惯）照常能用，只是登录用不了。
+
+     **这里以前写过一个 document.write 去 CDN 捞兜底库，
+     结果把 HTML 解析器搞乱了，导致它后面第一个 <script src>
+     （也就是 sync.js）根本不执行** —— 表现是启动时报
+     "syncStatus is not defined"，整个 App 白屏。
+
+     教训：绝对不要用 document.write 动态插脚本。 */
+  window.__supabaseLoaded = (typeof window.supabase !== "undefined");
+</script>
+<script src="store.js"></script>
+<script src="calc.js"></script>
+<script src="charts.js"></script>
+<script src="assist.js"></script>
+<script src="sync.js"></script>
+<!-- notify.js 要在 app.js 之前：app.js 启动时会调
+     renderNotifyBadges / renderNotifyBanner，晚加载会报未定义。 -->
+<script src="notify.js"></script>
+<script src="account.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

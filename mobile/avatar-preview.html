@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>表情头像预览</title>
+<style>
+  body {
+    margin: 0; padding: 28px;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    background: #f4f5f7; color: #2f3540; font-size: 14px;
+  }
+  h1 { font-size: 19px; margin: 0 0 6px; }
+  .note { color: #78828f; font-size: 13px; margin-bottom: 22px; line-height: 1.7; }
+  h2 { font-size: 15px; margin: 30px 0 12px; color: #4d5563; }
+
+  .grid { display: flex; flex-wrap: wrap; gap: 14px; }
+  .item {
+    width: 150px; background: #fff; border: 1px solid #e3e6ea;
+    border-radius: 12px; padding: 12px; text-align: center;
+  }
+  .avatar {
+    width: 96px; height: 96px; margin: 0 auto 8px;
+    border-radius: 50%; overflow: hidden;
+    /* 棋盘格背景，方便看透明处理得好不好 */
+    background-image:
+      linear-gradient(45deg, #e8eaed 25%, transparent 25%),
+      linear-gradient(-45deg, #e8eaed 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #e8eaed 75%),
+      linear-gradient(-45deg, transparent 75%, #e8eaed 75%);
+    background-size: 14px 14px;
+    background-position: 0 0, 0 7px, 7px -7px, -7px 0;
+  }
+  .avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .name { font-weight: 600; color: #1b2028; }
+  .mood { font-size: 12px; color: #5f7893; margin-top: 2px; }
+  .usage { font-size: 12px; color: #78828f; margin-top: 3px; line-height: 1.5; }
+  .size { font-size: 11px; color: #a2aab5; margin-top: 5px; }
+
+  /* 深色底上看效果 */
+  .dark { background: #191b1f; border-color: #2e3238; }
+  .dark .name { color: #e8ecf1; }
+  .dark .mood { color: #a3bcd6; }
+  .dark .usage { color: #8b939f; }
+  .dark .avatar {
+    background-image:
+      linear-gradient(45deg, #22252a 25%, transparent 25%),
+      linear-gradient(-45deg, #22252a 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #22252a 75%),
+      linear-gradient(-45deg, transparent 75%, #22252a 75%);
+  }
+
+  /* 实际显示尺寸 */
+  .tiny-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 0; border-bottom: 1px solid #eceef1;
+  }
+  .tiny-row img { width: 32px; height: 32px; border-radius: 50%; }
+  .tiny-row img:nth-child(2) { width: 40px; height: 40px; }
+  .tiny-row img:nth-child(3) { width: 56px; height: 56px; }
+</style>
+</head>
+<body>
+  <h1>表情头像预览</h1>
+  <div class="note">
+    这些是**裁掉四周文字和符号后**的头像，256×256、透明背景、压缩过。<br>
+    棋盘格是透明区域的示意。看两件事：<br>
+    ① <b>脸有没有裁正</b>（偏上/偏下/切到脸）<br>
+    ② <b>白底去干净没有</b>（边缘有没有一圈白边）<br>
+    如果不对，改 <code>prepare-avatars.py</code> 里的 <code>CROPS</code> 再跑一次。
+  </div>
+
+  <h2>浅色主题下</h2>
+  <div class="grid">
+      <div class="item">
+        <div class="avatar"><img src="icons/01_嗯.webp" alt="01_嗯"></div>
+        <div class="name">01_嗯</div>
+        <div class="mood">中性 / 思考</div>
+        <div class="usage">小助手默认表情</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item">
+        <div class="avatar"><img src="icons/02_好耶.webp" alt="02_好耶"></div>
+        <div class="name">02_好耶</div>
+        <div class="mood">开心</div>
+        <div class="usage">一切正常、操作成功</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item">
+        <div class="avatar"><img src="icons/03_睡觉.webp" alt="03_睡觉"></div>
+        <div class="name">03_睡觉</div>
+        <div class="mood">安静</div>
+        <div class="usage">没有数据、空状态</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item">
+        <div class="avatar"><img src="icons/04_疑惑.webp" alt="04_疑惑"></div>
+        <div class="name">04_疑惑</div>
+        <div class="mood">疑惑</div>
+        <div class="usage">听不懂的问题</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item">
+        <div class="avatar"><img src="icons/05_哼.webp" alt="05_哼"></div>
+        <div class="name">05_哼</div>
+        <div class="mood">不满 / 警告</div>
+        <div class="usage">有风险、预算超支</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item">
+        <div class="avatar"><img src="icons/06_惊讶.webp" alt="06_惊讶"></div>
+        <div class="name">06_惊讶</div>
+        <div class="mood">惊讶 / 严重</div>
+        <div class="usage">严重风险、超期</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item">
+        <div class="avatar"><img src="icons/07_抱抱.webp" alt="07_抱抱"></div>
+        <div class="name">07_抱抱</div>
+        <div class="mood">亲和</div>
+        <div class="usage">鼓励、建议</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item">
+        <div class="avatar"><img src="icons/08_嗯嗯.webp" alt="08_嗯嗯"></div>
+        <div class="name">08_嗯嗯</div>
+        <div class="mood">认可 / 认真</div>
+        <div class="usage">确认、正在做</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item">
+        <div class="avatar"><img src="icons/09_暗中观察.webp" alt="09_暗中观察"></div>
+        <div class="name">09_暗中观察</div>
+        <div class="mood">观察</div>
+        <div class="usage">小助手等待输入</div>
+        <div class="size">0.4 KB</div>
+      </div></div>
+
+  <h2>深色主题下</h2>
+  <div class="grid">
+      <div class="item dark">
+        <div class="avatar"><img src="icons/01_嗯.webp" alt="01_嗯"></div>
+        <div class="name">01_嗯</div>
+        <div class="mood">中性 / 思考</div>
+        <div class="usage">小助手默认表情</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item dark">
+        <div class="avatar"><img src="icons/02_好耶.webp" alt="02_好耶"></div>
+        <div class="name">02_好耶</div>
+        <div class="mood">开心</div>
+        <div class="usage">一切正常、操作成功</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item dark">
+        <div class="avatar"><img src="icons/03_睡觉.webp" alt="03_睡觉"></div>
+        <div class="name">03_睡觉</div>
+        <div class="mood">安静</div>
+        <div class="usage">没有数据、空状态</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item dark">
+        <div class="avatar"><img src="icons/04_疑惑.webp" alt="04_疑惑"></div>
+        <div class="name">04_疑惑</div>
+        <div class="mood">疑惑</div>
+        <div class="usage">听不懂的问题</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item dark">
+        <div class="avatar"><img src="icons/05_哼.webp" alt="05_哼"></div>
+        <div class="name">05_哼</div>
+        <div class="mood">不满 / 警告</div>
+        <div class="usage">有风险、预算超支</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item dark">
+        <div class="avatar"><img src="icons/06_惊讶.webp" alt="06_惊讶"></div>
+        <div class="name">06_惊讶</div>
+        <div class="mood">惊讶 / 严重</div>
+        <div class="usage">严重风险、超期</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item dark">
+        <div class="avatar"><img src="icons/07_抱抱.webp" alt="07_抱抱"></div>
+        <div class="name">07_抱抱</div>
+        <div class="mood">亲和</div>
+        <div class="usage">鼓励、建议</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item dark">
+        <div class="avatar"><img src="icons/08_嗯嗯.webp" alt="08_嗯嗯"></div>
+        <div class="name">08_嗯嗯</div>
+        <div class="mood">认可 / 认真</div>
+        <div class="usage">确认、正在做</div>
+        <div class="size">0.4 KB</div>
+      </div>
+
+      <div class="item dark">
+        <div class="avatar"><img src="icons/09_暗中观察.webp" alt="09_暗中观察"></div>
+        <div class="name">09_暗中观察</div>
+        <div class="mood">观察</div>
+        <div class="usage">小助手等待输入</div>
+        <div class="size">0.4 KB</div>
+      </div></div>
+
+  <h2>实际显示尺寸</h2>
+  <div>
+      <div class="tiny-row">
+        <img src="icons/01_嗯.webp" alt="01_嗯">
+        <span>01_嗯 —— 实际显示尺寸（32 / 40 / 56px）</span>
+      </div>
+
+      <div class="tiny-row">
+        <img src="icons/02_好耶.webp" alt="02_好耶">
+        <span>02_好耶 —— 实际显示尺寸（32 / 40 / 56px）</span>
+      </div>
+
+      <div class="tiny-row">
+        <img src="icons/03_睡觉.webp" alt="03_睡觉">
+        <span>03_睡觉 —— 实际显示尺寸（32 / 40 / 56px）</span>
+      </div>
+
+      <div class="tiny-row">
+        <img src="icons/04_疑惑.webp" alt="04_疑惑">
+        <span>04_疑惑 —— 实际显示尺寸（32 / 40 / 56px）</span>
+      </div>
+
+      <div class="tiny-row">
+        <img src="icons/05_哼.webp" alt="05_哼">
+        <span>05_哼 —— 实际显示尺寸（32 / 40 / 56px）</span>
+      </div>
+
+      <div class="tiny-row">
+        <img src="icons/06_惊讶.webp" alt="06_惊讶">
+        <span>06_惊讶 —— 实际显示尺寸（32 / 40 / 56px）</span>
+      </div>
+
+      <div class="tiny-row">
+        <img src="icons/07_抱抱.webp" alt="07_抱抱">
+        <span>07_抱抱 —— 实际显示尺寸（32 / 40 / 56px）</span>
+      </div>
+
+      <div class="tiny-row">
+        <img src="icons/08_嗯嗯.webp" alt="08_嗯嗯">
+        <span>08_嗯嗯 —— 实际显示尺寸（32 / 40 / 56px）</span>
+      </div>
+
+      <div class="tiny-row">
+        <img src="icons/09_暗中观察.webp" alt="09_暗中观察">
+        <span>09_暗中观察 —— 实际显示尺寸（32 / 40 / 56px）</span>
+      </div></div>
+</body>
+</html>

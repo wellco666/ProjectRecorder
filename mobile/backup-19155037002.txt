@@ -1,0 +1,135 @@
+﻿┌────────────────────────────────────────────────────────────────────┐
+│ backup                                                             │
+├────────────────────────────────────────────────────────────────────┤
+│ {                                                                  │
+│     "tasks": [                                                     │
+│         {                                                          │
+│             "id": "10a6de5c-1156-4bfc-ab43-289cdf3ee934",          │
+│             "title": "你好",                                       │
+│             "detail": "",                                          │
+│             "boss_id": "efe67382-db81-483e-a1e9-285e452efa89",     │
+│             "accept_at": null,                                     │
+│             "est_hours": 0,                                        │
+│             "plan_date": "2026-10-11",                             │
+│             "step_name": "",                                       │
+│             "created_at": "2026-10-11T17:46:28+00:00",             │
+│             "updated_at": "2026-10-11T17:46:28+00:00",             │
+│             "employee_id": "b68f5483-bbef-4044-a6dc-bfbe61393337", │
+│             "project_name": "",                                    │
+│             "accept_reason": "",                                   │
+│             "accept_status": "pending"                             │
+│         }                                                          │
+│     ],                                                             │
+│     "profile": {                                                   │
+│         "id": "efe67382-db81-483e-a1e9-285e452efa89",              │
+│         "code": "19155037002",                                     │
+│         "name": "戮秀",                                            │
+│         "role": "boss",                                            │
+│         "email": "19155037002@boss.pr",                            │
+│         "active": true,                                            │
+│         "boss_id": null,                                           │
+│         "created_at": "2026-10-11T09:41:27.437071+00:00",          │
+│         "updated_at": "2026-10-11T09:41:27.437071+00:00",          │
+│         "weekly_hours": 40,                                        │
+│         "email_changed_at": null                                   │
+│     },                                                             │
+│     "worklogs": [                                                  │
+│         {                                                          │
+│             "id": "b9a20d7c-d853-44fd-8f61-0a1a85cbb9e2",          │
+│             "hours": 1,                                            │
+│             "source": "task",                                      │
+│             "boss_id": "efe67382-db81-483e-a1e9-285e452efa89",     │
+│             "content": "你好",                                     │
+│             "task_id": "10a6de5c-1156-4bfc-ab43-289cdf3ee934",     │
+│             "work_date": "2026-10-11",                             │
+│             "created_at": "2026-10-11T09:47:15.91866+00:00",       │
+│             "updated_at": "2026-10-11T09:47:15.91866+00:00",       │
+│             "employee_id": "b68f5483-bbef-4044-a6dc-bfbe61393337", │
+│             "project_name": ""                                     │
+│         },                                                         │
+│         {                                                          │
+│             "id": "b5a04d20-dbd3-4936-86ee-e728b93f5d1d",          │
+│             "hours": 1,                                            │
+│             "source": "task",                                      │
+│             "boss_id": "efe67382-db81-483e-a1e9-285e452efa89",     │
+│             "content": "你好",                                     │
+│             "task_id": "10a6de5c-1156-4bfc-ab43-289cdf3ee934",     │
+│             "work_date": "2026-10-11",                             │
+│             "created_at": "2026-10-11T09:58:51.396135+00:00",      │
+│             "updated_at": "2026-10-11T09:58:51.396135+00:00",      │
+│             "employee_id": "54dcec9d-3bd5-4798-a123-36bd4f843f16", │
+│             "project_name": ""                                     │
+│         },                                                         │
+│         {                                                          │
+│             "id": "2534e3fc-17df-4c2c-8d6f-ff5a1893f720",          │
+│             "hours": 6,                                            │
+│             "source": "task",                                      │
+│             "boss_id": "4c6d037c-b402-4faf-b75e-e6cfab5a92b9",     │
+│             "content": "白二冬马te耍起",                           │
+│             "task_id": "d221062f-6026-4448-9dd8-a86e7714661d",     │
+│             "work_date": "2026-10-12",                             │
+│             "created_at": "2026-10-12T12:58:19.092372+00:00",      │
+│             "updated_at": "2026-10-12T12:58:19.092372+00:00",      │
+│             "employee_id": "b68f5483-bbef-4044-a6dc-bfbe61393337", │
+│             "project_name": "耍起"                                 │
+│         },                                                         │
+│         {                                                          │
+│             "id": "42bd3c4d-368e-44ee-a45a-8cc8724b6cc4",          │
+│             "hours": 6,                                            │
+│             "source": "task",                                      │
+│             "boss_id": "4c6d037c-b402-4faf-b75e-e6cfab5a92b9",     │
+│             "content": "圣诞节斯特拉斯堡耍起",                     │
+│             "task_id": "74a83149-b7c0-4be7-89c2-68cb78ddb0e0",     │
+│             "work_date": "2026-10-12",                             │
+│             "created_at": "2026-10-12T12:58:20.225551+00:00",      │
+│             "updated_at": "2026-10-12T12:58:20.225551+00:00",      │
+│             "employee_id": "b68f5483-bbef-4044-a6dc-bfbe61393337", │
+│             "project_name": "耍起"                                 │
+│         }                                                          │
+│     ],                                                             │
+│     "employees": [                                                 │
+│         {                                                          │
+│             "id": "b68f5483-bbef-4044-a6dc-bfbe61393337",          │
+│             "code": "1145142026172549",                            │
+│             "name": "well",                                        │
+│             "role": "employee",                                    │
+│             "email": "1145142026172549@staff.pr",                  │
+│             "active": true,                                        │
+│             "boss_id": "efe67382-db81-483e-a1e9-285e452efa89",     │
+│             "created_at": "2026-10-11T09:43:48.511126+00:00",      │
+│             "updated_at": "2026-10-11T09:43:48.511126+00:00",      │
+│             "weekly_hours": 40,                                    │
+│             "email_changed_at": null                               │
+│         }                                                          │
+│     ],                                                             │
+│     "task_logs": [                                                 │
+│         {                                                          │
+│             "id": "70237bb2-5806-427e-9509-0b2655d67766",          │
+│             "task_id": "10a6de5c-1156-4bfc-ab43-289cdf3ee934",     │
+│             "started_at": null,                                    │
+│             "updated_at": "2026-10-11T09:47:15.155449+00:00",      │
+│             "employee_id": "b68f5483-bbef-4044-a6dc-bfbe61393337", │
+│             "finish_date": "2026-10-11",                           │
+│             "finished_at": "2026-10-11T17:47:07+00:00"             │
+│         }                                                          │
+│     ],                                                             │
+│     "task_events": [                                               │
+│         {                                                          │
+│             "id": "4c6b888a-585e-42c9-85ba-7cf4eeba9e2b",          │
+│             "kind": "assigned",                                    │
+│             "hours": 0,                                            │
+│             "title": "你好",                                       │
+│             "boss_id": "efe67382-db81-483e-a1e9-285e452efa89",     │
+│             "task_id": "10a6de5c-1156-4bfc-ab43-289cdf3ee934",     │
+│             "work_date": null,                                     │
+│             "created_at": "2026-10-11T17:46:28+00:00",             │
+│             "employee_id": "b68f5483-bbef-4044-a6dc-bfbe61393337"  │
+│         }                                                          │
+│     ],                                                             │
+│     "task_requests": [                                             │
+│     ]                                                              │
+│ }                                                                  │
+└────────────────────────────────────────────────────────────────────┘
+A new version of Supabase CLI is available: v2.121.0 (currently installed v2.120.0)
+We recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#up
+dating-the-supabase-cli

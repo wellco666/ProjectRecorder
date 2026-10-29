@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>布局诊断（开发用）</title>
+<style>
+  body { font-family: Consolas, monospace; font-size: 13px; padding: 12px; margin: 0; }
+  pre { background: #f6f8fa; padding: 10px; white-space: pre-wrap; }
+  iframe { width: 360px; height: 640px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>布局诊断</h1>
+<pre id="out">运行中…</pre>
+<iframe id="app" src="index.html"></iframe>
+<script>
+const lines = [];
+const log = s => { lines.push(s); document.getElementById('out').textContent = lines.join('\n'); };
+document.getElementById('app').addEventListener('load', () => {
+  setTimeout(() => {
+    const w = document.getElementById('app').contentWindow;
+    const d = w.document;
+    log('视口宽度 innerWidth = ' + w.innerWidth);
+    log('document 宽度 = ' + d.documentElement.clientWidth);
+    log('');
+    log('body.scrollWidth   = ' + d.body.scrollWidth);
+    log('body.clientWidth   = ' + d.body.clientWidth);
+    log('是否横向溢出        = ' + (d.body.scrollWidth > d.body.clientWidth ? '是 ✗' : '否 ✓'));
+    log('');
+    ['page-login'].forEach(id => {
+      const p = d.getElementById(id);
+      if (!p) { log(id + ' 找不到'); return; }
+      log('--- ' + id + ' ---');
+      log('  scrollWidth=' + p.scrollWidth + '  clientWidth=' + p.clientWidth);
+      Array.from(p.querySelectorAll('*')).forEach(el => {
+        if (el.scrollWidth > el.clientWidth + 2 && el.clientWidth > 0) {
+          log('  溢出元素: <' + el.tagName.toLowerCase() +
+              (el.id ? ' id=' + el.id : '') +
+              (el.className ? ' class=' + el.className : '') + '>' +
+              '  scrollW=' + el.scrollWidth + ' clientW=' + el.clientWidth);
+        }
+      });
+    });
+    const nav = d.getElementById('nav');
+    log('');
+    log('nav 的 display = ' + w.getComputedStyle(nav).display);
+    const banner = d.querySelector('#login-cloud .banner');
+    if (banner) {
+      const cs = w.getComputedStyle(banner);
+      log('banner overflow-wrap = ' + cs.overflowWrap);
+      log('banner word-break    = ' + cs.wordBreak);
+      log('banner scrollW=' + banner.scrollWidth + ' clientW=' + banner.clientWidth);
+    }
+  }, 800);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>输入框标签检查（开发用）</title>
+<style>
+  body { font-family: Consolas, monospace; font-size: 13px; padding: 12px; margin: 0; }
+  .pass { color: #1a7f37; font-weight: bold; }
+  .fail { color: #b42318; font-weight: bold; }
+  pre { background: #f6f8fa; padding: 10px; white-space: pre-wrap; line-height: 1.5; }
+</style>
+</head>
+<body>
+<h1>输入框标签检查</h1>
+<pre id="out">运行中…</pre>
+<script>
+/* 每个输入框要么有可见的 <label for>，要么有 aria-label。
+
+   这个检查是在**删掉所有 placeholder 之后**加的：
+   删掉那些"例如 王老板"之类的示例文字是好事（用户要求），
+   但如果某个框既没 label 又没 aria-label，
+   用户就会对着一个空框发呆。
+   —— 助手页的问答框就是这样被查出来的。 */
+const lines = [];
+let bad = 0;
+const log = s => { lines.push(s); document.getElementById('out').innerHTML =
+  (bad ? '<span class="fail">' + bad + ' 个输入框缺标签</span>'
+       : '<span class="pass">全部通过</span>')
+  + '<pre>' + lines.join('\n') + '</pre>'; };
+
+Promise.all([
+  fetch('index.html').then(r => r.text()),
+  fetch('app.js').then(r => r.text()),
+  fetch('account.js').then(r => r.text()),
+]).then(texts => {
+  const sources = {
+    'index.html': texts[0], 'app.js': texts[1], 'account.js': texts[2],
+  };
+  const all = texts.join('\n');
+
+  let checked = 0;
+  Object.keys(sources).forEach(file => {
+    const src = sources[file];
+    /* 抓整个标签，这样能检查它自己的属性 */
+    const tagPattern = /<(input|textarea|select)\b([^>]*)>/g;
+    let m;
+    while ((m = tagPattern.exec(src)) !== null) {
+      const tag = m[1];
+      const attrs = m[2];
+      const idMatch = attrs.match(/\bid="([^"]+)"/);
+      if (!idMatch) continue;         // 没有 id 的不管（可能是模板片段）
+      const id = idMatch[1];
+      /* 只查 input/select，跳过 hidden */
+      if (/\btype="hidden"/.test(attrs)) continue;
+      checked += 1;
+
+      const hasFor = all.indexOf('for="' + id + '"') !== -1;
+      const hasAria = /\baria-label=/.test(attrs);
+      if (!hasFor && !hasAria) {
+        bad += 1;
+        log('缺标签  ' + file + '  <' + tag + ' id="' + id + '">');
+        log('        ' + attrs.trim().replace(/\s+/g, ' ').slice(0, 90));
+      }
+    }
+  });
+
+  log('');
+  if (bad) log('上面这些框在界面上没有任何说明文字。');
+  else log('检查了 ' + checked + ' 个输入框，都有可见标签');
+  log('--- 完成 ---');
+}).catch(error => {
+  bad += 1;
+  log('脚本出错：' + error.message);
+});
+</script>
+</body>
+</html>

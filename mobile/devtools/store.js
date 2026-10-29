@@ -1,0 +1,1114 @@
+/* =============================================================
+   数据层：手机是本机的数据库。
+
+   这一版的原则变了 —— **手机是主库**，不是电脑的镜像。
+   所以这里要能真的增删改，不是只读。
+
+   存储用 localStorage：
+     · 容量够（一般 5~10 MB，够存几万条工时）
+     · 同步 API，不用处理 Promise，代码短、出错点少
+     · Capacitor 打包成 apk 后依然是本地持久化的
+   如果哪天数据量真的超过容量，再换 IndexedDB —— 接口不变，
+   只要把 read()/write() 两个函数换掉。
+
+   所有写操作都会调 _save()，它顺带更新 updated_at。
+   这个时间戳是后面「和电脑同步」时判断谁新谁旧的依据。
+   ============================================================= */
+"use strict";
+
+const DB_KEY = "pr_database_v1";
+const SETTINGS_KEY = "pr_settings_v1";
+
+/* ---------------------------------------------------------- 空库结构 */
+function emptyDatabase() {
+  return {
+    schema: 1,
+    created_at: nowISO(),
+    updated_at: nowISO(),
+    projects: [],
+    steps: [],
+    employees: [],
+    worklogs: [],
+    assignments: [],
+    assessments: [],
+    metrics: [],
+    sessions: [],
+    /* 习惯。**只有老板自己用**，所以没有 owner 字段——
+       要给员工派习惯的话再加，现在加等于给一个不存在的需求留坑。
+
+       一张 habit 一条习惯，habitLogs 一条打卡记录。
+       用两张表而不是"在 habit 里存一串日期"，是因为：
+         · 打卡记录要能单独查（某天打了哪些）
+         · 以后要加备注、数值，塞进字符串就僵住了 */
+    habits: [],
+    habitLogs: [],
+    // 自增 id。不用随机 id，是因为要让人看得懂（P1、E3），
+    // 也让导出文件比随机串短很多。
+    seq: { project: 0, step: 0, employee: 0, worklog: 0,
+           assignment: 0, assessment: 0, metric: 0, session: 0,
+           habit: 0, habitLog: 0, sync: 0 },
+
+    /* ---------- 以下为账号 / 云同步相关的本地结构 ---------- */
+
+    /* 老板派下来的任务（员工端用）。
+       **注意这里没有"待同步"之类的状态字段**——
+       同步状态全部放在 syncQueue 里，一张表管一件事。
+       如果把标记散在各个表里，漏掉一处就会出现
+       "这条改了但永远不上传"这种查不出来的 bug。 */
+    tasks: [],
+
+    /* 勾选记录：哪条任务在什么时候完成的。
+       服务端也有这张表，本地是缓存 + 待上传。 */
+    taskLogs: [],
+
+    /* 老板端收到的员工工时（来自服务端）。
+       单独放一张表，**不和本地的 worklogs 混在一起**——
+       混的话就没法区分"我自己记的"和"员工报上来的"，
+       删除、编辑、去重的处理方式完全不同。
+       统计时用 allWorklogs() 把两边合起来。 */
+    remoteWorklogs: [],
+
+    /* 老板建的员工账号（本地记录，含待创建的）。
+       `pending: true` 表示还没在云端建号。
+
+       **为什么要在本地记一份**：Supabase 客户端建账号会
+       顶掉当前登录（老板会被员工账号登出）。所以先记下来，
+       由老板主动点"同步账号"时批量创建。 */
+    staffAccounts: [],
+
+    /* 待上传的变更队列。没网时攒着，联网后按顺序补传。 */
+    syncQueue: [],
+
+    /* 各表最后一次成功拉取的时间，用来做增量拉取。
+       没有它就只能每次全量拉，数据一多就慢。 */
+    syncCursor: {},
+
+    /* 当前登录的人（profile）。null = 没登录 / 单机模式。
+       存一份本地副本是为了**离线也能进主界面**——
+       没网时不能把人挡在登录页外面。 */
+    profile: null,
+
+    /* 上次同步的结果，界面上显示"已同步 / 待上传 N 条" */
+    lastSync: { at: "", ok: true, pending: 0, message: "" },
+
+    /* ---------- 通知 ---------- */
+
+    /* 收到的消息（最多保留 200 条，见 addNotification）。
+       每一条是**已经发生的事**，不是"待办"。
+
+       为什么放在本地而不是服务端：
+         · 已读状态是**每台设备各自的**（老板手机上看过了，
+           平板不用跟着变成已读）
+         · 离线也要能看到历史
+       服务端只负责产生"事件"（task_events），
+       这边负责"我看到了哪些、哪些还没读"。 */
+    notifications: [],
+
+    /* 处理到哪个事件为止了。键是事件来源，值是时间戳。
+       用它避免重复通知：拉到的老事件不再提醒第二遍。 */
+    notifyCursor: {},
+
+    /* 服务端还没建 task_events 表时置为 true（sql/migrate-notify.sql 没跑）。
+       界面上据此提示一句，而不是让用户纳闷"怎么没有通知"。 */
+    notifyTableMissing: false,
+
+    /* 上次检查到的系统通知权限结果
+       { supported, granted }。放在这里而不是每次现查——
+       checkPermissions 是异步的，而 renderMe 是同步渲染的。 */
+    notifyPermission: null,
+
+    /* Android FCM registration. */
+    pushToken: "",
+    pushRegisteredAt: "",
+
+    /* 通知开关。默认全开——用户既然要这个功能，
+       默认关掉等于没做。 */
+    notifyPrefs: {
+      enabled: true,
+      /* 应用内：底部导航小红点 + 页面顶部提示条 */
+      inApp: true,
+      /* 系统通知：安卓通知栏 */
+      system: true,
+      /* 完成/取消完成/工时汇总/新任务/项目状态，逐项可控 */
+      onTaskAssigned: true,
+      onTaskDone: true,
+      onTaskUndone: true,
+      onWorklogSummary: true,
+      onProjectStatus: true,
+    },
+  };
+}
+
+let DB = null;
+
+/* ---------------------------------------------------------- 时间工具 */
+function nowISO() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+        + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function todayISO() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/* ---------------------------------------------------------- 存取 */
+function loadAll() {
+  let raw = null;
+  try {
+    raw = localStorage.getItem(DB_KEY);
+  } catch (error) {
+    // 隐私模式或存储被禁时 localStorage 会抛异常。
+    // 这时程序仍要能用，只是关掉页面数据就没了——必须让用户知道。
+    throw new Error("浏览器不允许本地存储，数据无法保存：" + error.message);
+  }
+  if (!raw) return emptyDatabase();
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error("本地数据损坏，无法解析：" + error.message);
+  }
+  return migrate(parsed);
+}
+
+function saveAll() {
+  DB.updated_at = nowISO();
+  try {
+    localStorage.setItem(DB_KEY, JSON.stringify(DB));
+  } catch (error) {
+    // 超容量是最可能的失败原因，提示要说清
+    throw new Error(
+      "保存失败（可能是存储空间满了）：" + error.message
+      + "\n建议导出一次备份，然后清掉旧的工时。"
+    );
+  }
+}
+
+/* 让调用方读起来像「保存」这个动作，而不是写文件 */
+function _save() { saveAll(); }
+
+/* ---------------------------------------------------------- 版本升级 */
+function migrate(data) {
+  // 每加一个字段都在这里补默认值，否则老数据读进来会 undefined
+  const base = emptyDatabase();
+  const merged = Object.assign({}, base, data || {});
+  merged.seq = Object.assign({}, base.seq, (data && data.seq) || {});
+  ["projects", "steps", "employees", "worklogs", "assignments",
+   "assessments", "metrics", "sessions", "habits", "habitLogs",
+   "tasks", "taskLogs", "remoteWorklogs", "staffAccounts", "syncQueue",
+   "notifications"]
+    .forEach(key => {
+      if (!Array.isArray(merged[key])) merged[key] = [];
+    });
+  /* 这几个是对象不是数组，单独补。
+     写成数组兜底会让 syncCursor[key] 取不到值，静默失效。 */
+  if (!merged.syncCursor || typeof merged.syncCursor !== "object"
+      || Array.isArray(merged.syncCursor)) {
+    merged.syncCursor = {};
+  }
+  if (!merged.notifyCursor || typeof merged.notifyCursor !== "object"
+      || Array.isArray(merged.notifyCursor)) {
+    merged.notifyCursor = {};
+  }
+  if (!merged.lastSync || typeof merged.lastSync !== "object"
+      || Array.isArray(merged.lastSync)) {
+    merged.lastSync = { at: "", ok: true, pending: 0, message: "" };
+  }
+  /* 通知开关：**逐项补默认值**，不能整个替换。
+     整个替换的话，将来加一个新开关，老用户升级后
+     那个开关会是 undefined（表现为"这项通知永远不发"）。 */
+  if (!merged.notifyPrefs || typeof merged.notifyPrefs !== "object"
+      || Array.isArray(merged.notifyPrefs)) {
+    merged.notifyPrefs = {};
+  }
+  merged.notifyPrefs = Object.assign({}, base.notifyPrefs,
+                                     merged.notifyPrefs);
+  if (merged.profile === undefined) merged.profile = null;
+  return merged;
+}
+
+/* ---------------------------------------------------------- 自增 id */
+function nextId(kind) {
+  DB.seq[kind] = (DB.seq[kind] || 0) + 1;
+  return DB.seq[kind];
+}
+
+/* ---------------------------------------------------------- 设置项 */
+function loadSettings() {
+  try {
+    return JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveSetting(key, value) {
+  const all = loadSettings();
+  all[key] = value;
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(all));
+  } catch (error) {
+    /* 设置存不上不影响使用，静默即可 */
+  }
+}
+
+function getSetting(key, fallback) {
+  const all = loadSettings();
+  return all[key] === undefined ? fallback : all[key];
+}
+
+/* ============================================================
+   项目
+   ============================================================ */
+const PROJECT_FIELDS = [
+  "name", "owner", "client", "status", "priority",
+  "start_date", "due_date", "budget", "cost", "progress", "note",
+];
+
+function addProject(data) {
+  const project = {
+    id: nextId("project"),
+    name: String(data.name || "").trim(),
+    owner: data.owner || "",
+    client: data.client || "",
+    status: data.status || "进行中",
+    priority: data.priority || "中",
+    start_date: data.start_date || "",
+    due_date: data.due_date || "",
+    budget: num(data.budget),
+    cost: num(data.cost),
+    progress: clamp(num(data.progress), 0, 100),
+    note: data.note || "",
+    created_at: nowISO(),
+    updated_at: nowISO(),
+  };
+  if (!project.name) throw new Error("项目名称不能为空。");
+  DB.projects.push(project);
+  _save();
+  return project;
+}
+
+function updateProject(id, data) {
+  const project = getProject(id);
+  if (!project) throw new Error("这个项目已经不存在了。");
+  PROJECT_FIELDS.forEach(key => {
+    if (data[key] === undefined) return;
+    if (key === "budget" || key === "cost") project[key] = num(data[key]);
+    else if (key === "progress") project[key] = clamp(num(data[key]), 0, 100);
+    else if (key === "name") {
+      const name = String(data.name).trim();
+      if (!name) throw new Error("项目名称不能为空。");
+      project[key] = name;
+    } else project[key] = data[key];
+  });
+  project.updated_at = nowISO();
+  _save();
+  return project;
+}
+
+function getProject(id) {
+  return DB.projects.find(item => item.id === Number(id)) || null;
+}
+
+function deleteProject(id) {
+  const pid = Number(id);
+  // 级联删掉从属于它的东西。工时也一起删——
+  // 留着「项目已删但工时还在」会让负荷统计出现找不到项目的记录。
+  DB.steps = DB.steps.filter(item => item.project_id !== pid);
+  DB.worklogs = DB.worklogs.filter(item => item.project_id !== pid);
+  DB.assignments = DB.assignments.filter(item => item.project_id !== pid);
+  DB.assessments = DB.assessments.filter(item => item.project_id !== pid);
+  DB.metrics = DB.metrics.filter(item => item.project_id !== pid);
+  DB.projects = DB.projects.filter(item => item.id !== pid);
+  _save();
+}
+
+function projectSteps(projectId) {
+  return DB.steps
+    .filter(item => item.project_id === Number(projectId))
+    .sort((a, b) => (a.seq || 0) - (b.seq || 0) || a.id - b.id);
+}
+
+/* ============================================================
+   步骤
+   ============================================================ */
+function addStep(projectId, data) {
+  const pid = Number(projectId);
+  if (!getProject(pid)) throw new Error("这个项目已经不存在了。");
+  const siblings = projectSteps(pid);
+  const step = {
+    id: nextId("step"),
+    project_id: pid,
+    seq: data.seq === undefined ? siblings.length + 1 : num(data.seq),
+    name: String(data.name || "").trim(),
+    owner: data.owner || "",
+    status: data.status || "未开始",
+    start_date: data.start_date || "",
+    due_date: data.due_date || "",
+    progress: clamp(num(data.progress), 0, 100),
+    note: data.note || "",
+  };
+  if (!step.name) throw new Error("步骤名称不能为空。");
+  DB.steps.push(step);
+  _save();
+  return step;
+}
+
+function updateStep(id, data) {
+  const step = DB.steps.find(item => item.id === Number(id));
+  if (!step) throw new Error("这个步骤已经不存在了。");
+  ["seq", "name", "owner", "status", "start_date", "due_date",
+   "progress", "note"].forEach(key => {
+    if (data[key] === undefined) return;
+    if (key === "progress" || key === "seq") step[key] = num(data[key]);
+    else step[key] = data[key];
+  });
+  if (!String(step.name).trim()) throw new Error("步骤名称不能为空。");
+  _save();
+  return step;
+}
+
+function deleteStep(id) {
+  const sid = Number(id);
+  // 工时不跟着删，只是把关联去掉——那条工时是真干过的活，
+  // 不该因为步骤被删就消失（和电脑端 ON DELETE SET NULL 一致）
+  DB.worklogs.forEach(item => { if (item.step_id === sid) item.step_id = null; });
+  DB.assignments.forEach(item => { if (item.step_id === sid) item.step_id = null; });
+  DB.steps = DB.steps.filter(item => item.id !== sid);
+  _save();
+}
+
+/* ============================================================
+   员工
+   ============================================================ */
+function addEmployee(data) {
+  const employee = {
+    id: nextId("employee"),
+    name: String(data.name || "").trim(),
+    role: data.role || "",
+    level: data.level || "",
+    weekly_hours: num(data.weekly_hours) || 40,
+    hired_date: data.hired_date || "",
+    active: data.active === undefined ? 1 : num(data.active),
+    note: data.note || "",
+  };
+  if (!employee.name) throw new Error("姓名不能为空。");
+  DB.employees.push(employee);
+  _save();
+  return employee;
+}
+
+function updateEmployee(id, data) {
+  const employee = getEmployee(id);
+  if (!employee) throw new Error("这个人已经不在名单里了。");
+  ["name", "role", "level", "weekly_hours", "hired_date", "active",
+   "note"].forEach(key => {
+    if (data[key] === undefined) return;
+    if (key === "weekly_hours") employee[key] = num(data[key]) || 40;
+    else if (key === "active") employee[key] = num(data[key]);
+    else employee[key] = data[key];
+  });
+  if (!String(employee.name).trim()) throw new Error("姓名不能为空。");
+  _save();
+  return employee;
+}
+
+function getEmployee(id) {
+  return DB.employees.find(item => item.id === Number(id)) || null;
+}
+
+function employeeByName(name) {
+  return DB.employees.find(item => item.name === name) || null;
+}
+
+function activeEmployees() {
+  return DB.employees.filter(item => item.active !== 0);
+}
+
+function deleteEmployee(id) {
+  const eid = Number(id);
+  // 工时和分配跟着删。一个人被删掉，他报的工时没有归属了，
+  // 留着只会让统计出错。要保留历史的话应该改「离职」而不是删。
+  DB.worklogs = DB.worklogs.filter(item => item.employee_id !== eid);
+  DB.assignments = DB.assignments.filter(item => item.employee_id !== eid);
+  DB.sessions = DB.sessions.filter(item => item.employee_id !== eid);
+  DB.employees = DB.employees.filter(item => item.id !== eid);
+  _save();
+}
+
+/* ============================================================
+   工时
+   ============================================================ */
+function addWorklog(data, options) {
+  const opts = options || {};
+  const employee = getEmployee(data.employee_id);
+  if (!employee) throw new Error("先选一个人。");
+  const hours = num(data.hours);
+  if (hours <= 0) throw new Error("工时要大于 0。");
+  if (hours > 24) throw new Error("一天不可能超过 24 小时。");
+  const date = String(data.work_date || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("日期格式不对。");
+  if (date > todayISO()) throw new Error("不能填未来的日期。");
+
+  const projectId = data.project_id === undefined || data.project_id === ""
+    ? null : Number(data.project_id);
+  if (projectId !== null && !getProject(projectId)) {
+    throw new Error("这个项目已经不存在了。");
+  }
+
+  // 手录的重复提醒：由调用方决定是否已经问过用户
+  if (!opts.allowDuplicate) {
+    const twin = findDuplicate(data);
+    if (twin) throw new Error(
+      "DUPLICATE:" + `${twin.work_date} ${employeeName(twin.employee_id)} `
+      + `${projectName(twin.project_id)} ${num(twin.hours)} 小时`
+    );
+  }
+
+  // 步骤必须属于所选项目，不然就是数据串了
+  let stepId = data.step_id === undefined || data.step_id === "" || !data.step_id
+    ? null : Number(data.step_id);
+  if (stepId !== null) {
+    const step = DB.steps.find(item => item.id === stepId);
+    if (!step || step.project_id !== projectId) stepId = null;
+  }
+
+  const log = {
+    id: nextId("worklog"),
+    employee_id: employee.id,
+    project_id: projectId,
+    step_id: stepId,
+    work_date: date,
+    hours: hours,
+    content: String(data.content || ""),
+    // timer / manual：电脑端靠这个区分「真实计时」和「手工补录」
+    source: data.source === "timer" ? "timer" : "manual",
+    created_at: nowISO(),
+  };
+  DB.worklogs.push(log);
+  _save();
+  return log;
+}
+
+function updateWorklog(id, data) {
+  const log = DB.worklogs.find(item => item.id === Number(id));
+  if (!log) throw new Error("这条工时已经不存在了。");
+  if (data.hours !== undefined) {
+    const hours = num(data.hours);
+    if (hours <= 0 || hours > 24) throw new Error("工时要大于 0 且不超过 24。");
+    log.hours = hours;
+  }
+  if (data.work_date !== undefined) {
+    const date = String(data.work_date).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("日期格式不对。");
+    if (date > todayISO()) throw new Error("不能填未来的日期。");
+    log.work_date = date;
+  }
+  if (data.project_id !== undefined) {
+    log.project_id = data.project_id === "" || data.project_id === null
+      ? null : Number(data.project_id);
+    if (log.project_id !== null && !getProject(log.project_id)) {
+      throw new Error("这个项目已经不存在了。");
+    }
+    // 换了项目，原来的步骤可能不属于新项目了
+    if (log.step_id) {
+      const step = DB.steps.find(item => item.id === log.step_id);
+      if (!step || step.project_id !== log.project_id) log.step_id = null;
+    }
+  }
+  if (data.step_id !== undefined) {
+    log.step_id = data.step_id === "" || data.step_id === null
+      ? null : Number(data.step_id);
+  }
+  if (data.employee_id !== undefined) {
+    const employee = getEmployee(data.employee_id);
+    if (!employee) throw new Error("这个人已经不在名单里了。");
+    log.employee_id = employee.id;
+  }
+  if (data.content !== undefined) log.content = String(data.content);
+  log.updated_at = nowISO();
+  _save();
+  return log;
+}
+
+function deleteWorklog(id) {
+  DB.worklogs = DB.worklogs.filter(item => item.id !== Number(id));
+  _save();
+}
+
+/* 找出「同一个人 + 同一项目 + 同一天 + 同样工时 + 同样说明」的记录。
+   界面用它提醒可能重复，但**由人决定要不要继续**——
+   上午下午各干 4 小时、备注写一样，是真实存在的两条。 */
+function findDuplicate(data) {
+  const employeeId = Number(data.employee_id);
+  const projectId = data.project_id === undefined || data.project_id === ""
+    ? null : Number(data.project_id);
+  const hours = num(data.hours);
+  const content = String(data.content || "");
+  const date = String(data.work_date || "");
+  return DB.worklogs.find(item =>
+    item.employee_id === employeeId
+    && item.project_id === projectId
+    && item.work_date === date
+    && Math.abs(num(item.hours) - hours) < 0.001
+    && String(item.content || "") === content) || null;
+}
+
+/* 查工时。
+
+   ## 关于 employee_id 的比较
+
+   **不能写 `item.employee_id === Number(opts.employee_id)`。**
+   员工在云端的 id 是 uuid 字符串，`Number("a1b2-...")` 得到 NaN，
+   那个比较永远为 false —— 员工报的工时一条都筛不出来。
+
+   所以统一用**字符串比较**：`String(甲) === String(乙)`。
+   本地自增整数和云端 uuid 都能正确处理。
+
+   ## includeRemote
+
+   默认只查本机自己记的——因为改、删、导出这些操作只对本机记录有效。
+   统计和展示时传 true，会一并带上 `DB.remoteWorklogs`
+   （员工通过云端报上来的），并补上 `__source` 字段标明来源。 */
+function worklogsFor(options) {
+  const opts = options || {};
+  let rows = DB.worklogs.map(item => Object.assign({ __source: "local" }, item));
+
+  if (opts.includeRemote) {
+    rows = rows.concat((DB.remoteWorklogs || []).map(item =>
+      Object.assign({ __source: "cloud" }, item)));
+  }
+
+  if (opts.employee_id !== undefined && opts.employee_id !== null) {
+    const wanted = String(opts.employee_id);
+    rows = rows.filter(item => String(item.employee_id) === wanted);
+  }
+  if (opts.project_id !== undefined && opts.project_id !== null) {
+    const wanted = String(opts.project_id);
+    rows = rows.filter(item => String(item.project_id) === wanted);
+  }
+  if (opts.date_from) rows = rows.filter(item => item.work_date >= opts.date_from);
+  if (opts.date_to) rows = rows.filter(item => item.work_date <= opts.date_to);
+
+  /* **id 用字符串比**：uuid 相减得到 NaN，
+     会让排序结果不可预测（看起来像"顺序是随机的"）。 */
+  rows.sort((a, b) =>
+    String(b.work_date || "").localeCompare(String(a.work_date || ""))
+    || String(b.id || "").localeCompare(String(a.id || "")));
+  if (opts.limit) rows = rows.slice(0, opts.limit);
+  return rows;
+}
+
+/* ============================================================
+   分配 / 评估 / 指标
+   ============================================================ */
+function addAssignment(data) {
+  const project = getProject(data.project_id);
+  if (!project) throw new Error("先选项目。");
+  const employee = getEmployee(data.employee_id);
+  if (!employee) throw new Error("先选人。");
+  let stepId = data.step_id ? Number(data.step_id) : null;
+  if (stepId !== null) {
+    const step = DB.steps.find(item => item.id === stepId);
+    if (!step || step.project_id !== project.id) stepId = null;
+  }
+  const row = {
+    id: nextId("assignment"),
+    project_id: project.id,
+    step_id: stepId,
+    employee_id: employee.id,
+    role_in_task: data.role_in_task || "",
+    planned_hours: num(data.planned_hours),
+    start_date: data.start_date || "",
+    due_date: data.due_date || "",
+    status: data.status || "待开始",
+  };
+  DB.assignments.push(row);
+  _save();
+  return row;
+}
+
+function deleteAssignment(id) {
+  DB.assignments = DB.assignments.filter(item => item.id !== Number(id));
+  _save();
+}
+
+function projectAssignments(projectId) {
+  return DB.assignments.filter(item => item.project_id === Number(projectId));
+}
+
+function addAssessment(projectId, data) {
+  const project = getProject(projectId);
+  if (!project) throw new Error("这个项目已经不存在了。");
+  const row = {
+    id: nextId("assessment"),
+    project_id: project.id,
+    kind: data.kind === "resource" ? "resource" : "ability",
+    name: String(data.name || "").trim(),
+    score: clamp(num(data.score) || 3, 1, 5),
+    weight: num(data.weight),
+    note: data.note || "",
+  };
+  if (!row.name) throw new Error("名称不能为空。");
+  if (row.weight <= 0) row.weight = 1;
+  DB.assessments.push(row);
+  _save();
+  return row;
+}
+
+function deleteAssessment(id) {
+  DB.assessments = DB.assessments.filter(item => item.id !== Number(id));
+  _save();
+}
+
+function projectAssessments(projectId, kind) {
+  return DB.assessments.filter(item =>
+    item.project_id === Number(projectId)
+    && (kind === undefined || item.kind === kind));
+}
+
+function addMetric(projectId, data) {
+  const project = getProject(projectId);
+  if (!project) throw new Error("这个项目已经不存在了。");
+  const name = String(data.name || "").trim();
+  if (!name) throw new Error("指标名不能为空。");
+  const date = String(data.metric_date || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("日期格式不对。");
+  const row = {
+    id: nextId("metric"),
+    project_id: project.id,
+    metric_date: date,
+    name: name,
+    value: num(data.value),
+    unit: data.unit || "",
+    note: data.note || "",
+  };
+  DB.metrics.push(row);
+  _save();
+  return row;
+}
+
+function deleteMetric(id) {
+  DB.metrics = DB.metrics.filter(item => item.id !== Number(id));
+  _save();
+}
+
+function projectMetrics(projectId, name) {
+  let rows = DB.metrics.filter(item => item.project_id === Number(projectId));
+  if (name) rows = rows.filter(item => item.name === name);
+  rows.sort((a, b) => (a.metric_date || "").localeCompare(b.metric_date || ""));
+  return rows;
+}
+
+function metricNames(projectId) {
+  const seen = [];
+  projectMetrics(projectId).forEach(item => {
+    if (seen.indexOf(item.name) === -1) seen.push(item.name);
+  });
+  return seen;
+}
+
+/* ============================================================
+   同步队列
+   ============================================================
+
+   为什么要有队列，而不是"改完直接上传"：
+
+     1. **没网也能用**。员工在外面勾任务，写不上去不能丢，
+        先排队，联网自动补传。
+     2. **不阻塞界面**。上传是异步的，界面按本地数据先画出来，
+        不能等网络——否则点一下要卡一秒。
+
+   队列项结构：{ id, dedupe, table, op, key, payload, at }
+
+       table    目标表名（tasks / task_logs / worklogs）
+       op       "insert" | "update" | "delete"
+       dedupe   **去重键**。同一个键的变更只保留最后一次——
+                改了三次只需要上传最终状态，中间那次没人关心。
+                没有去重的话，员工反复改一条记录会让队列无限增长。
+
+   同步状态**只放在这一张表里**，不散到各个业务表。
+   散出去的话，漏掉一处就会出现"这条改了但永远不上传"
+   这种查不出来的 bug。
+   ============================================================ */
+
+function queueChange(table, op, key, payload) {
+  if (!Array.isArray(DB.syncQueue)) DB.syncQueue = [];
+  const dedupeKey = `${table}:${op}:${key}`;
+  DB.syncQueue = DB.syncQueue.filter(item => item.dedupe !== dedupeKey);
+  DB.syncQueue.push({
+    id: nextId("sync"),
+    dedupe: dedupeKey,
+    table: table,
+    op: op,
+    key: String(key),
+    payload: payload || {},
+    at: nowISO(),
+  });
+  _save();
+  return DB.syncQueue.length;
+}
+
+/* 队列里还有多少条待上传 */
+function pendingCount() {
+  return Array.isArray(DB.syncQueue) ? DB.syncQueue.length : 0;
+}
+
+/* 上传成功后清掉那些项。只删成功的，失败的留着下次重试。 */
+function clearQueueItems(ids) {
+  if (!Array.isArray(DB.syncQueue)) return;
+  const remove = ids.map(Number);
+  DB.syncQueue = DB.syncQueue.filter(item => remove.indexOf(item.id) === -1);
+  _save();
+}
+
+/* 登录 / 退出时重置同步状态。
+
+   为什么必须重置：
+     profile.id 是服务端分配的 uuid，而本地很多表用自增整数 id。
+     切换账号后如果不清 cursor，增量拉取会从"上一个人的时间点"
+     继续，于是漏掉新账号这段时间的数据。
+
+   **notifyCursor 也一起清**：否则换了账号之后，
+   新账号的事件时间戳比旧 cursor 早的会被当成"已经看过"而漏掉通知。 */
+function resetSyncState() {
+  DB.syncQueue = [];
+  DB.syncCursor = {};
+  DB.notifyCursor = {};
+  DB.lastSync = { at: "", ok: true, pending: 0, message: "" };
+  _save();
+}
+
+/* ============================================================
+   任务（员工端）
+   ============================================================
+   任务由老板派发，员工这边**只读**——本地的 tasks 只是服务端
+   数据的缓存。员工改了也没用，因为不会写回服务端。
+   ============================================================ */
+
+function tasksOn(dateText) {
+  const date = dateText || todayISO();
+  return DB.tasks
+    .filter(item => item.plan_date === date)
+    .sort((a, b) => (a.sort || 0) - (b.sort || 0)
+                    || String(a.id).localeCompare(String(b.id)));
+}
+
+function taskById(id) {
+  return DB.tasks.find(item => String(item.id) === String(id)) || null;
+}
+
+/* 这条任务今天完成了吗 */
+function taskLogFor(taskId) {
+  if (!Array.isArray(DB.taskLogs)) return null;
+  return DB.taskLogs.find(log =>
+    String(log.task_id) === String(taskId)) || null;
+}
+
+/* ============================================================
+   习惯
+   ============================================================
+
+   两种类型：
+     daily     打勾型——"今天做没做"
+     quantity  计量型——"今天做了多少"，要够到 target 才算完成
+
+   周期用 weekdays 表达：存 "1 3 5"（周一到周日是 1~7）。
+     空字符串 = 每天。
+   这样一条习惯就能表达"每周一三五"、"只在周末"这些情况，
+   不用为每种周期建一条。
+   ============================================================ */
+
+const WEEKDAY_NAMES = ["一", "二", "三", "四", "五", "六", "日"];
+
+/* 日期是周几，1~7（周一=1，周日=7）。
+   JS 的 getDay() 是 0=周日，所以要转换。 */
+function weekdayOf(dateText) {
+  const date = parseDate(dateText) || new Date();
+  const day = date.getDay();
+  return day === 0 ? 7 : day;
+}
+
+/* 这条习惯今天该不该做 */
+function habitDueOn(habit, dateText) {
+  if (habit.active === 0) return false;
+  const weekdays = String(habit.weekdays || "").trim();
+  if (!weekdays) return true;                    // 每天
+  const day = weekdayOf(dateText);
+  return weekdays.split(/[\s,]+/).indexOf(String(day)) !== -1;
+}
+
+function habitById(id) {
+  return DB.habits.find(item => item.id === Number(id)) || null;
+}
+
+function activeHabits() {
+  return DB.habits.slice()
+    .filter(item => item.active !== 0)
+    .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.id - b.id);
+}
+
+/* 今天（或指定日期）要做的习惯 */
+function habitsDueOn(dateText) {
+  const date = dateText || todayISO();
+  return activeHabits().filter(habit => habitDueOn(habit, date));
+}
+
+function addHabit(data) {
+  const name = String(data.name || "").trim();
+  if (!name) throw new Error("习惯名称不能为空");
+
+  const kind = data.kind === "quantity" ? "quantity" : "daily";
+  const target = num(data.target);
+  if (kind === "quantity" && target <= 0) {
+    throw new Error("计量型习惯要填一个大于 0 的目标值");
+  }
+
+  const habit = {
+    id: nextId("habit"),
+    name: name,
+    kind: kind,
+    target: kind === "quantity" ? target : 0,
+    unit: String(data.unit || "").trim(),
+    weekdays: String(data.weekdays || "").trim(),
+    note: String(data.note || "").trim(),
+    /* sort 用手动序号：习惯的顺序是人为的（重要的排前面），
+       不像工时那样有自然顺序。新建的排到最后。 */
+    sort: (DB.habits.reduce((max, item) => Math.max(max, item.sort || 0), 0)) + 1,
+    active: data.active === 0 ? 0 : 1,
+    created_at: nowISO(),
+  };
+  DB.habits.push(habit);
+  _save();
+  return habit;
+}
+
+function updateHabit(id, data) {
+  const habit = habitById(id);
+  if (!habit) throw new Error("这条习惯已经不存在了");
+
+  if (data.name !== undefined) {
+    const name = String(data.name).trim();
+    if (!name) throw new Error("习惯名称不能为空");
+    habit.name = name;
+  }
+  if (data.kind !== undefined) {
+    habit.kind = data.kind === "quantity" ? "quantity" : "daily";
+  }
+  if (data.target !== undefined) habit.target = num(data.target);
+  if (data.unit !== undefined) habit.unit = String(data.unit).trim();
+  if (data.weekdays !== undefined) {
+    habit.weekdays = String(data.weekdays).trim();
+  }
+  if (data.note !== undefined) habit.note = String(data.note).trim();
+  if (data.active !== undefined) habit.active = data.active === 0 ? 0 : 1;
+  if (data.sort !== undefined) habit.sort = num(data.sort);
+
+  if (habit.kind === "quantity" && habit.target <= 0) {
+    throw new Error("计量型习惯要填一个大于 0 的目标值");
+  }
+  _save();
+  return habit;
+}
+
+/* 删习惯连它的打卡记录一起删——留着就是孤儿数据 */
+function deleteHabit(id) {
+  const hid = Number(id);
+  DB.habits = DB.habits.filter(item => item.id !== hid);
+  DB.habitLogs = DB.habitLogs.filter(item => item.habit_id !== hid);
+  _save();
+}
+
+/* ---------------------------------------------------------- 打卡 */
+
+function habitLogOn(habitId, dateText) {
+  const hid = Number(habitId);
+  const date = dateText || todayISO();
+  return DB.habitLogs.find(item =>
+    item.habit_id === hid && item.log_date === date) || null;
+}
+
+/* 某天的所有打卡记录 */
+function habitLogsOn(dateText) {
+  const date = dateText || todayISO();
+  return DB.habitLogs.filter(item => item.log_date === date);
+}
+
+/* 打卡。**同一天同一条习惯只保留一条记录**——
+   重复调用是"覆盖"而不是"追加"，所以可以放心连点。 */
+function checkHabit(habitId, value, note) {
+  const habit = habitById(habitId);
+  if (!habit) throw new Error("这条习惯已经不存在了");
+
+  const date = todayISO();
+  const amount = value === undefined || value === null
+    ? (habit.kind === "quantity" ? num(habit.target) : 1)
+    : num(value);
+  if (habit.kind === "quantity" && amount <= 0) {
+    throw new Error("填的数值要大于 0，否则取消打卡就好");
+  }
+
+  const existing = habitLogOn(habit.id, date);
+  if (existing) {
+    existing.value = amount;
+    if (note !== undefined) existing.note = String(note);
+    existing.done_at = nowISO();
+  } else {
+    DB.habitLogs.push({
+      id: nextId("habitLog"),
+      habit_id: habit.id,
+      log_date: date,
+      value: amount,
+      note: note === undefined ? "" : String(note),
+      done_at: nowISO(),
+    });
+  }
+  _save();
+  return habitLogOn(habit.id, date);
+}
+
+/* 取消打卡 */
+function uncheckHabit(habitId, dateText) {
+  const hid = Number(habitId);
+  const date = dateText || todayISO();
+  const before = DB.habitLogs.length;
+  DB.habitLogs = DB.habitLogs.filter(item =>
+    !(item.habit_id === hid && item.log_date === date));
+  if (DB.habitLogs.length !== before) _save();
+  return DB.habitLogs.length !== before;
+}
+
+/* 点一下圆圈：打过卡就取消，没打卡就打上。
+   界面上只需要调这一个函数。 */
+function toggleHabit(habitId) {
+  const log = habitLogOn(habitId, todayISO());
+  if (log) { uncheckHabit(habitId); return false; }
+  checkHabit(habitId);
+  return true;
+}
+
+/* 这条打卡算不算"完成"。
+   打勾型：有记录就算完成。
+   计量型：值要达到目标才算——记了 10 分钟但目标是 30 分钟，不算完成。 */
+function habitDone(log, habit) {
+  if (!log) return false;
+  if (habit.kind !== "quantity") return true;
+  return num(log.value) >= num(habit.target);
+}
+
+/* 连续完成天数（从今天往回数）。
+   今天还没打卡不算断——可能还没到做的时候，所以从昨天继续数。
+   这个"宽容"很重要：否则早上一打开就显示"连续 0 天"，
+   会让人直接放弃。 */
+function habitStreak(habitId, upToDate) {
+  const habit = habitById(habitId);
+  if (!habit) return 0;
+
+  const logs = {};
+  DB.habitLogs.forEach(item => {
+    if (item.habit_id === Number(habitId)) logs[item.log_date] = item;
+  });
+
+  const end = parseDate(upToDate || todayISO()) || new Date();
+  let streak = 0;
+  let cursor = new Date(end.getTime());
+  let first = true;
+
+  /* 最多往前看 365 天，防止数据异常时死循环 */
+  for (let step = 0; step < 365; step += 1) {
+    const key = dateToISO(cursor);
+    if (habitDueOn(habit, key)) {
+      if (habitDone(logs[key], habit)) {
+        streak += 1;
+      } else if (first) {
+        /* 今天（或起点那天）还没打——跳过，不断连 */
+      } else {
+        break;
+      }
+    }
+    first = false;
+    cursor = new Date(cursor.getTime() - 86400000);
+  }
+  return streak;
+}
+
+/* 一段时间内的完成率，返回 {due, done, rate} */
+function habitRate(habitId, days) {
+  const habit = habitById(habitId);
+  if (!habit) return { due: 0, done: 0, rate: 0 };
+
+  const logs = {};
+  DB.habitLogs.forEach(item => {
+    if (item.habit_id === Number(habitId)) logs[item.log_date] = item;
+  });
+
+  const today = parseDate(todayISO());
+  let due = 0;
+  let done = 0;
+  for (let i = 0; i < days; i += 1) {
+    const key = dateToISO(new Date(today.getTime() - i * 86400000));
+    if (!habitDueOn(habit, key)) continue;
+    due += 1;
+    if (habitDone(logs[key], habit)) done += 1;
+  }
+  return { due: due, done: done, rate: due ? done / due : 0 };
+}
+
+/* 今天的完成情况，界面直接用 */
+function todayHabitRows() {
+  const today = todayISO();
+  return habitsDueOn(today).map(habit => {
+    const log = habitLogOn(habit.id, today);
+    return {
+      habit: habit,
+      log: log,
+      done: habitDone(log, habit),
+      value: log ? num(log.value) : 0,
+      streak: habitStreak(habit.id, today),
+    };
+  });
+}
+
+/* ============================================================
+   通用小工具（别处也用到，放这里一起）
+
+   计时相关的函数（nowMono / sessionElapsed / formatDuration /
+   setSession / getSession / clearSession）已经全部删除——
+   手机版的计时器整个去掉了，工时改成纯手工记。
+
+   数据库结构里仍保留 `sessions` 数组：删掉的话，
+   万一有历史计时数据会读不出来。已有的计时工时照样算进统计，
+   只是不能再新增了。
+   ============================================================ */
+function num(value) {
+  if (value === null || value === undefined || value === "") return 0;
+  const parsed = parseFloat(value);
+  return isFinite(parsed) ? parsed : 0;
+}
+
+function clamp(value, low, high) {
+  return Math.min(high, Math.max(low, value));
+}
+
+function projectName(id) {
+  const project = getProject(id);
+  return project ? project.name : "";
+}
+
+function employeeName(id) {
+  const employee = getEmployee(id);
+  return employee ? employee.name : "";
+}
+
+function stepName(id) {
+  const step = DB.steps.find(item => item.id === Number(id));
+  return step ? step.name : "";
+}
+
+function stepById(id) {
+  return DB.steps.find(item => item.id === Number(id)) || null;
+}

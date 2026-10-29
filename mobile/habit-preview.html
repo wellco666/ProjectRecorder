@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>习惯功能预览</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px; background: #eceef1; color: #2f3540;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    font-size: 13px;
+  }
+  .bar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 12px 14px; background: #fff; border: 1px solid #e0e4e9;
+    border-radius: 10px; margin-bottom: 16px;
+  }
+  .bar b { font-size: 14px; margin-right: 6px; }
+  .bar button {
+    padding: 7px 13px; border: 1px solid #ccd2da; border-radius: 7px;
+    background: #fff; color: #2f3540; font-size: 12.5px;
+    font-family: inherit; cursor: pointer;
+  }
+  .bar button:hover { background: #f2f4f7; }
+  .bar .primary { background: #7c93ad; border-color: #7c93ad; color: #fff; }
+  .bar .primary:hover { background: #6d84a0; }
+  .bar .sep { width: 1px; height: 22px; background: #e0e4e9; margin: 0 4px; }
+  .note { color: #6b7481; margin-bottom: 14px; line-height: 1.7; }
+  .note code {
+    background: #eef1f4; padding: 1px 5px; border-radius: 4px;
+    font-family: Consolas, monospace;
+  }
+
+  /* 手机框。宽度 300px，和真机宽度接近 */
+  .phone {
+    width: 300px; height: 620px; overflow-y: auto;
+    border: 1px solid #d8dce2; border-radius: 14px;
+    background: var(--bg); position: relative;
+    box-shadow: 0 2px 12px rgba(40, 50, 70, .1);
+  }
+  .phone iframe { width: 100%; height: 100%; border: 0; display: block; }
+  .wrap { display: flex; gap: 18px; align-items: flex-start; }
+  .legend { max-width: 340px; line-height: 1.9; }
+  .legend h3 { font-size: 13px; margin: 0 0 6px; }
+  .legend ul { padding-left: 18px; margin: 0 0 14px; color: #4d5563; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <b>习惯功能预览</b>
+    <button id="btn-seed" class="primary">造一份示例数据</button>
+    <button id="btn-clear">清空</button>
+    <div class="sep"></div>
+    <button id="btn-light">浅色</button>
+    <button id="btn-dark">深色</button>
+    <div class="sep"></div>
+    <button id="btn-check">全部打卡</button>
+    <button id="btn-uncheck">全部取消</button>
+  </div>
+
+  <div class="note">
+    iframe 里跑的是<strong>真实手机版代码</strong>。上面那些按钮直接操作它的
+    localStorage，然后调它自己的 <code>renderDash()</code> 重画。<br>
+    <strong>造数据</strong>会写入 5 条习惯 + 最近 20 天的打卡记录（含刻意留的断档），
+    这样连续天数和完成率都能看出效果。
+  </div>
+
+  <div class="wrap">
+    <div class="phone"><iframe id="app" src="index.html"></iframe></div>
+
+    <div class="legend">
+      <h3>看这几处</h3>
+      <ul>
+        <li><b>标题</b>：应该是「今日打卡 3/5　周五」——完成数和星期几</li>
+        <li><b>实心圆圈</b>：打勾型已打卡（带勾）</li>
+        <li><b>进度环</b>：计量型没达标时是环，达标后变实心</li>
+        <li><b>右上角数字</b>：连续天数，只在超过 1 天时显示</li>
+        <li><b>横向滚动</b>：习惯多了可以左右滑</li>
+        <li><b>深色</b>：进度环、实心圆、徽标的颜色是否都还清楚</li>
+      </ul>
+
+      <h3>示例数据包含</h3>
+      <ul>
+        <li>每天晨会（打勾）</li>
+        <li>每天走 8000 步（计量）</li>
+        <li>每周一三五复盘（打勾，只有部分日子要做）</li>
+        <li>每周日对账（打勾，今天可能不该做）</li>
+        <li>每天读书 30 分钟（计量，故意记一次不够量的）</li>
+      </ul>
+      <div style="color:#6b7481">
+        打卡记录刻意留了断档，所以「连续天数」不会都是满的——
+        那种全是 20 天的数据看不出对错。
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  const frame = document.getElementById("app");
+
+  /* 等 iframe 里的真实应用加载完，拿到它的 window */
+  function withApp(fn) {
+    try {
+      const win = frame.contentWindow;
+      if (!win || typeof win.renderDash !== "function") {
+        alert("应用还没加载完，等一下再点。");
+        return;
+      }
+      fn(win);
+      /* 重画看板，让改动立刻显示出来 */
+      win.renderDash();
+    } catch (error) {
+      alert("操作失败：" + error.message);
+    }
+  }
+
+  function days(n) {
+    return `dateToISO(new Date(today().getTime() - ${n} * 86400000))`;
+  }
+
+  /* 造示例数据。用 iframe 里的 store 函数写入，
+     所以走的是和真实使用完全一样的代码路径。 */
+  document.getElementById("btn-seed").onclick = () => withApp(win => {
+    win.DB = win.loadAll();
+
+    /* 清掉旧的，避免反复点导致数据叠加 */
+    win.DB.habits = [];
+    win.DB.habitLogs = [];
+    win.DB.seq.habit = 0;
+    win.DB.seq.habitLog = 0;
+
+    const habits = [
+      { name: "晨会", kind: "daily", weekdays: "" },
+      { name: "走 8000 步", kind: "quantity", target: 8000,
+        unit: "步", weekdays: "" },
+      { name: "复盘", kind: "daily", weekdays: "1 3 5" },
+      { name: "对账", kind: "daily", weekdays: "7" },
+      { name: "读书 30 分钟", kind: "quantity", target: 30,
+        unit: "分钟", weekdays: "" },
+      /* 下面三条是为了让那一排**长到能横向滑动**——
+         只有 5 条的话在 300px 宽里放得下，看不出滚动效果。 */
+      { name: "喝够 8 杯水", kind: "quantity", target: 8,
+        unit: "杯", weekdays: "" },
+      { name: "写日报", kind: "daily", weekdays: "1 2 3 4 5" },
+      { name: "拉伸 10 分钟", kind: "quantity", target: 10,
+        unit: "分钟", weekdays: "1 3 5 7" },
+    ];
+    const made = habits.map(item => win.addHabit(item));
+
+    /* 最近 20 天。每条的打卡规律不同，刻意留断档：
+         · 晨会        打了大部分，中间断过两天
+         · 走 8000 步  打了 12 天，其中 3 天只走了 5000（不达标）
+         · 复盘        只在周一三六打（周六不打，制造一个断点）
+         · 对账        只打了两个周日
+         · 读书        只打了 5 天，其中今天故意只记 15 分钟（进度环半满） */
+    const plan = [
+      [0, [0, 1, 2, 4, 5, 6, 7, 9, 10, 11, 13, 14, 16, 18]],   // 晨会
+      [1, [0, 1, 3, 4, 5, 8, 9, 10, 12, 15, 17, 19]],           // 步数
+      [2, [0, 2, 3, 5, 7, 9, 10, 12, 14, 16, 17, 19]],          // 复盘
+      [3, [3, 10, 17]],                                          // 对账
+      [4, [0, 2, 5, 9, 14]],                                     // 读书
+      [5, [0, 1, 2, 3, 5, 6, 8, 11, 13, 15]],                    // 喝水
+      [6, [0, 1, 2, 4, 5, 7, 8, 9, 11, 12, 14, 16]],             // 日报
+      [7, [0, 3, 5, 8, 11, 14, 17]],                             // 拉伸
+    ];
+
+    plan.forEach(([index, offsets]) => {
+      const habit = made[index];
+      offsets.forEach((offset, position) => {
+        const date = win.eval(days(offset));
+        if (!win.habitDueOn(habit, date)) return;   // 那天不该做，跳过
+
+        let value = 1;
+        if (habit.kind === "quantity") {
+          if (habit.name.indexOf("步") !== -1) {
+            /* 每 4 次里有 1 次不达标，让进度环有"半满"的样子 */
+            value = position % 4 === 3 ? 5000 : 8000 + position * 100;
+          } else {
+            /* 今天（offset 0）故意只记 15 分钟，不到 30 */
+            value = offset === 0 ? 15 : 30 + (position % 3) * 5;
+          }
+        }
+        win.DB.habitLogs.push({
+          id: win.nextId("habitLog"),
+          habit_id: habit.id,
+          log_date: date,
+          value: value,
+          note: "",
+          done_at: date + " 08:00:00",
+        });
+      });
+    });
+
+    win.saveAll();
+  });
+
+  document.getElementById("btn-clear").onclick = () => withApp(win => {
+    win.DB = win.loadAll();
+    win.DB.habits = [];
+    win.DB.habitLogs = [];
+    win.DB.seq.habit = 0;
+    win.DB.seq.habitLog = 0;
+    win.saveAll();
+  });
+
+  document.getElementById("btn-check").onclick = () => withApp(win => {
+    win.DB = win.loadAll();
+    win.todayHabitRows().forEach(row => {
+      if (row.done) return;
+      win.checkHabit(row.habit.id,
+        row.habit.kind === "quantity" ? row.habit.target : 1);
+    });
+  });
+
+  document.getElementById("btn-uncheck").onclick = () => withApp(win => {
+    win.DB = win.loadAll();
+    win.habitsDueOn().forEach(habit => win.uncheckHabit(habit.id));
+  });
+
+  document.getElementById("btn-light").onclick = () =>
+    withApp(win => win.applyTheme("light"));
+  document.getElementById("btn-dark").onclick = () =>
+    withApp(win => win.applyTheme("dark"));
+
+  /* 第一次加载完自动造一次数据，省得还要点一下 */
+  frame.addEventListener("load", () => {
+    setTimeout(() => document.getElementById("btn-seed").click(), 300);
+  });
+})();
+</script>
+</body>
+</html>

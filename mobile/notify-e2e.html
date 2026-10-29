@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>通知端到端测试（开发用）</title>
+<style>
+  body { font-family: Consolas, monospace; font-size: 13px;
+         padding: 12px; margin: 0; }
+  .pass { color: #1a7f37; } .fail { color: #b42318; font-weight: bold; }
+  pre { background: #f6f8fa; padding: 10px; white-space: pre-wrap;
+        line-height: 1.55; }
+  iframe { width: 360px; height: 640px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>通知端到端测试</h1>
+<pre id="out">运行中…</pre>
+<!-- 这个 iframe 加载的是**用假客户端顶掉真库**的 App，
+     所以整条链路能在没有 Supabase 表的情况下跑通。 -->
+<iframe id="app" src="_mock-index.html"></iframe>
+<script>
+const lines = [];
+let failed = 0;
+const log = s => {
+  lines.push(s);
+  document.getElementById('out').innerHTML =
+    (failed ? '<span class="fail">失败 ' + failed + ' 项</span>'
+            : '<span class="pass">全部通过</span>')
+    + '<pre>' + lines.join('\n') + '</pre>';
+};
+function check(label, cond, detail) {
+  if (cond) log('PASS  ' + label);
+  else {
+    failed += 1;
+    log('FAIL  ' + label + (detail ? '  —— ' + detail : ''));
+  }
+}
+
+const frame = document.getElementById('app');
+
+frame.addEventListener('load', () => {
+  setTimeout(run, 800);
+});
+
+function run() {
+  const w = frame.contentWindow;
+  const mock = w.__mock;
+
+  if (!mock) {
+    check('假客户端已加载', false, 'window.__mock 不存在');
+    return;
+  }
+  check('假客户端已加载', true);
+  check('真库已被换掉（window.supabase 是假的）',
+    typeof w.supabase === 'object'
+    && typeof w.supabase.createClient === 'function');
+
+  /* ---------- 1. 员工视角：老板派了新任务 ---------- */
+  log('');
+  log('--- 场景 1：员工收到"老板派了新任务" ---');
+
+  const staffId = 'staff-uuid-0000-4000-8000-000000000001';
+  const bossId = 'boss-uuid-0000-4000-8000-000000000001';
+  mock.db.task_events = [{
+    id: 'ev-assigned-1',
+    task_id: 'task-1',
+    boss_id: bossId,
+    employee_id: staffId,
+    kind: 'assigned',
+    title: '把订单接口的鉴权补上',
+    hours: 3,
+    work_date: '2026-10-12',
+    created_at: '2026-10-12 09:00:00',
+  }];
+
+  /* **必须用 .then 把结果存到 window 上，再轮询取。**
+
+     `w.eval("(async function(){...})()")` 返回的是**跨 realm 的
+     Promise**，父页面 await 不了它（realm 不同，微任务队列也不共享）。
+     直接赋值给变量会拿到一个 Promise 对象，里面什么都没有。 */
+  w.eval(`window.__staffResult = null;
+    (async function () {
+      saveSyncConfig("https://mock.local", "mock-key");
+      initCloud();
+      await cloudLogin("mockstaff", "123456", true);
+      clearNotifications();
+      await syncNow("test");
+      var list = notifications();
+      return {
+        role: DB.profile ? DB.profile.role : null,
+        count: list.length,
+        kinds: list.map(function (n) { return n.kind; }),
+        titles: list.map(function (n) { return n.title; }),
+        body: list.length ? list[0].body : null,
+        unread: unreadCount(),
+        badges: document.querySelectorAll("#nav .nav-badge").length,
+        banner: (document.getElementById("notify-banner-tasks") || {}).innerHTML || "",
+      };
+    })().then(function (r) { window.__staffResult = r; })
+       .catch(function (e) {
+         window.__staffResult = { error: String(e.message || e) };
+       });`);
+
+  /* eval 里是 async，拿到的可能是 Promise——用轮询等它落定 */
+  waitFor(() => w.eval("window.__staffResult"), 8000).then(result => {
+    if (!result) {
+      check('员工同步完成', false, '超时');
+      finish();
+      return;
+    }
+    if (result.error) {
+      check('员工同步没抛错', false, result.error);
+      finish();
+      return;
+    }
+    check('员工身份正确', result.role === 'employee', String(result.role));
+    check('收到 1 条"新任务"通知', result.count === 1,
+      '收到 ' + result.count + ' 条：' + JSON.stringify(result.kinds));
+    check('类型是 assigned',
+      result.kinds.indexOf('assigned') !== -1,
+      JSON.stringify(result.kinds));
+    check('文案里有任务名',
+      String(result.body).indexOf('订单接口') !== -1,
+      String(result.body));
+    check('未读数是 1', result.unread === 1, String(result.unread));
+    check('底部导航画出了红点', result.badges > 0, String(result.badges));
+    check('任务页提示条渲染出来了',
+      result.banner.indexOf('notify-banner') !== -1,
+      String(result.banner).slice(0, 80));
+
+    return afterStaff(result);
+  }).catch(error => {
+    failed += 1;
+    log('FAIL  员工场景异常：' + error.message);
+    finish();
+  });
+}
+
+function afterStaff(staffResult) {
+  const w = frame.contentWindow;
+  const mock = w.__mock;
+  const bossId = 'boss-uuid-0000-4000-8000-000000000001';
+  const staffId = 'staff-uuid-0000-4000-8000-000000000001';
+
+  /* ---------- 2. 老板视角：员工完成 + 取消 + 汇总 ---------- */
+  log('');
+  log('--- 场景 2：老板收到完成 / 取消完成 / 工时汇总 ---');
+
+  mock.db.task_events = [
+    { id: 'ev-done-1', task_id: 'task-1', boss_id: bossId,
+      employee_id: staffId, kind: 'done', title: '把订单接口的鉴权补上',
+      hours: 3, work_date: '2026-10-12', created_at: '2026-10-12 11:00:00' },
+    { id: 'ev-done-2', task_id: 'task-2', boss_id: bossId,
+      employee_id: staffId, kind: 'done', title: '写部署文档',
+      hours: 1, work_date: '2026-10-12', created_at: '2026-10-12 11:30:00' },
+    { id: 'ev-undone-1', task_id: 'task-2', boss_id: bossId,
+      employee_id: staffId, kind: 'undone', title: '写部署文档',
+      work_date: '2026-10-12', created_at: '2026-10-12 12:00:00' },
+  ];
+  /* 两条工时都拉到本地；取消那条会被撤销 */
+  mock.db.worklogs = [
+    { id: 'wl-1', boss_id: bossId, employee_id: staffId, task_id: 'task-1',
+      work_date: todayInMock(), hours: 3, content: '把订单接口的鉴权补上' },
+    { id: 'wl-2', boss_id: bossId, employee_id: staffId, task_id: 'task-2',
+      work_date: todayInMock(), hours: 1, content: '写部署文档' },
+  ];
+  mock.db.profiles = [{
+    id: staffId, code: 'mockstaff', name: '测试员工',
+    role: 'employee', boss_id: bossId,
+  }];
+
+  w.eval(`window.__bossResult = null;
+    (async function () {
+      saveSyncConfig("https://mock.local", "mock-key");
+      initCloud();
+      await cloudLogin("mockboss", "123456", false);
+      clearNotifications();
+      await syncNow("test");
+      var list = notifications();
+      return {
+        role: DB.profile ? DB.profile.role : null,
+        count: list.length,
+        kinds: list.map(function (n) { return n.kind; }),
+        bodies: list.map(function (n) { return n.body; }),
+        /* 撤销之后本地还剩几条工时 */
+        worklogsLeft: (DB.remoteWorklogs || []).length,
+        leftTask: (DB.remoteWorklogs || []).length
+          ? DB.remoteWorklogs[0].task_id : null,
+        unread: unreadCount(),
+        badges: document.querySelectorAll("#nav .nav-badge").length,
+      };
+    })().then(function (r) { window.__bossResult = r; })
+       .catch(function (e) {
+         window.__bossResult = { error: String(e.message || e) };
+       });`);
+
+  waitFor(() => w.eval("window.__bossResult"), 8000).then(result => {
+    if (!result) {
+      check('老板同步完成', false, '超时');
+      finish();
+      return;
+    }
+    if (result.error) {
+      check('老板同步没抛错', false, result.error);
+      finish();
+      return;
+    }
+    check('老板身份正确', result.role === 'boss', String(result.role));
+
+    /* 员工的两条完成 + 一条取消 = 三条通知，外加一条汇总 */
+    check('收到了完成类通知',
+      result.kinds.indexOf('done') !== -1,
+      JSON.stringify(result.kinds));
+    check('收到了取消完成通知',
+      result.kinds.indexOf('undone') !== -1,
+      JSON.stringify(result.kinds));
+    check('收到两条"完成"（两条任务）',
+      result.kinds.filter(k => k === 'done').length === 2,
+      JSON.stringify(result.kinds));
+    check('收到了工时汇总',
+      result.kinds.indexOf('summary') !== -1,
+      JSON.stringify(result.kinds));
+
+    /* **关键：取消那条的工时真的要撤掉** */
+    check('撤销之后只剩 1 条工时', result.worklogsLeft === 1,
+      '还剩 ' + result.worklogsLeft + ' 条');
+    check('留下的是没被取消的那条（task-1）',
+      result.leftTask === 'task-1', String(result.leftTask));
+
+    /* 汇总只能算活着的那条（3 小时），不能算 4 */
+    const summary = result.bodies.filter((_, i) =>
+      result.kinds[i] === 'summary');
+    log('   汇总文案：' + JSON.stringify(summary));
+    check('汇总小时数是 3 不是 4',
+      summary.length === 1 && summary[0].indexOf('3') !== -1
+      && summary[0].indexOf('4') === -1,
+      JSON.stringify(summary));
+
+    check('红点画出来了', result.badges > 0, String(result.badges));
+
+    return afterBoss(result);
+  }).catch(error => {
+    failed += 1;
+    log('FAIL  老板场景异常：' + error.message);
+    finish();
+  });
+}
+
+function afterBoss(bossResult) {
+  const w = frame.contentWindow;
+  const mock = w.__mock;
+
+  /* ---------- 3. 表不存在时的降级 ---------- */
+  log('');
+  log('--- 场景 3：服务端还没有 task_events 表时降级 ---');
+
+  mock.missingTables = ['task_events'];
+  mock.db.task_events = [];
+  /* 员工的两条完成事件留着，用来确认"没有表就没有通知" */
+  mock.db.worklogs = [{
+    id: 'wl-keep', boss_id: 'boss-uuid-0000-4000-8000-000000000001',
+    employee_id: 'staff-uuid-0000-4000-8000-000000000001',
+    task_id: 'task-1', work_date: todayInMock(), hours: 3,
+    content: '把订单接口的鉴权补上',
+  }];
+
+  w.eval(`window.__degradeResult = null;
+    (async function () {
+      clearNotifications();
+      /* **把项目状态快照和对齐时间清掉。**
+
+         不清的话 pumpNotifications 里的 ingestProjectStatus 会把
+         "上一个场景留下的快照"和现在比，发现变化就产生一条项目通知——
+         而这条通知跟"表缺不缺"没关系，会把这一项误判成失败。
+         测试要把无关的变量也控住。 */
+      DB.notifyCursor = {};
+      var status = await syncNow("test-degrade");
+      return {
+        /* 同步整体不能因为缺表而报错 */
+        ok: !!(status && status.last && status.last.ok),
+        message: (status && status.last && status.last.message) || "",
+        notifications: notifications().length,
+        /* **只看事件类通知。**
+           工时汇总在这个场景里是正常的（mock 有一条今天的工时），
+           所以不能把通知总数当成断言。 */
+        eventKinds: notifications().map(function (n) { return n.kind; })
+          .filter(function (k) {
+            return k === "assigned" || k === "done" || k === "undone";
+          }),
+        summaryCount: notifications().filter(function (n) {
+          return n.kind === "summary"; }).length,
+        /* 其他数据必须照常拉到——这是降级的核心 */
+        worklogs: (DB.remoteWorklogs || []).length,
+        error: null,
+      };
+    })().then(function (r) { window.__degradeResult = r; })
+       .catch(function (e) {
+         window.__degradeResult = { error: String(e.message || e) };
+       });`);
+
+  waitFor(() => w.eval("window.__degradeResult"), 8000).then(result => {
+    if (!result || result.error) {
+      check('表缺失时同步不崩', false, result ? result.error : '超时');
+      finish();
+      return;
+    }
+    check('表缺失时同步不抛错', true);
+    check('同步整体仍算成功（不被缺表拖累）', result.ok === true,
+      result.message);
+    check('其他数据照常拉到（工时还在）', result.worklogs >= 1,
+      '工时 ' + result.worklogs + ' 条');
+    /* **断言要精确：看的是"事件类通知"，不是"通知总数"。**
+
+       这个场景里 mock 有一条今天的工时，所以 ingestWorklogSummary
+       会正常产生一条**工时汇总**——那是正确行为。
+       我一开始写成 `notifications === 0`，于是把正确行为当成了失败。
+
+       缺表真正该保证的是：**没有任何"派任务/完成/取消"类通知**。 */
+    check('没有事件类通知（缺表就没有事件）',
+      result.eventKinds.length === 0,
+      '事件类通知：' + JSON.stringify(result.eventKinds));
+    log('   通知总数 ' + result.notifications
+      + '（含汇总 ' + result.summaryCount + ' 条，属正常）');
+
+    /* ---------- 4. 请求确实带上了身份过滤 ---------- */
+    log('');
+    log('--- 场景 4：拉事件时带上了身份过滤 ---');
+    const eventQueries = mock.log.filter(item => item.table === 'task_events');
+    log('   task_events 的请求：' + eventQueries.length + ' 次');
+    check('确实去拉了 task_events', eventQueries.length > 0,
+      String(eventQueries.length));
+    /* 老板的请求应当按 boss_id 过滤，员工按 employee_id——
+       这是隔离的第一道；第二道是服务端的 RLS 策略。 */
+    const filtered = eventQueries.filter(q =>
+      (q.filters || []).some(f =>
+        f.col === 'boss_id' || f.col === 'employee_id'));
+    log('   其中带身份过滤的：' + filtered.length + ' 次');
+    finish();
+  }).catch(error => {
+    failed += 1;
+    log('FAIL  降级场景异常：' + error.message);
+    finish();
+  });
+}
+
+/* 轮询等一个表达式有值。沙箱里没有 await 的便利条件，
+   而 iframe 里的 Promise 又跨了 realm。 */
+function waitFor(getter, timeoutMs) {
+  return new Promise(resolve => {
+    const started = Date.now();
+    const tick = () => {
+      let value = null;
+      try { value = getter(); } catch (error) { value = null; }
+      if (value) { resolve(value); return; }
+      if (Date.now() - started > timeoutMs) { resolve(null); return; }
+      setTimeout(tick, 120);
+    };
+    tick();
+  });
+}
+
+function todayInMock() {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return now.getFullYear() + '-' + pad(now.getMonth() + 1)
+    + '-' + pad(now.getDate());
+}
+
+function finish() {
+  log('');
+  log('--- 完成 ---');
+}
+</script>
+</body>
+</html>

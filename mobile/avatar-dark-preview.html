@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>深色头像方案对比</title>
+<style>
+  body {
+    margin: 0; padding: 26px;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    background: #f4f5f7; color: #2f3540; font-size: 14px;
+  }
+  h1 { font-size: 19px; margin: 0 0 8px; }
+  h2 { font-size: 15px; margin: 30px 0 4px; color: #1b2028; }
+  .note { color: #78828f; font-size: 13px; line-height: 1.7; margin-bottom: 10px; }
+
+  .panels { display: flex; flex-wrap: wrap; gap: 12px; }
+  .panel { border-radius: 12px; padding: 12px; min-width: 260px; }
+  .panel.light { background: #f4f5f7; border: 1px solid #e3e6ea; }
+  .panel.dark  { background: #191b1f; border: 1px solid #2e3238; }
+  .panel-head { font-size: 11px; margin-bottom: 9px; letter-spacing: .3px; }
+  .panel.light .panel-head { color: #a2aab5; }
+  .panel.dark  .panel-head { color: #666d78; }
+  .cells { display: flex; align-items: flex-end; gap: 10px; }
+  .cell { text-align: center; }
+  .cap { display: block; font-size: 9px; margin-top: 4px; }
+  .panel.light .cap { color: #a2aab5; }
+  .panel.dark  .cap { color: #5a616b; }
+
+  /* ---- A 基准：不加任何处理 ---- */
+  .av { border-radius: 50%; display: block; object-fit: cover; }
+
+  /* ---- B 极细浅色描边 ---- */
+  /* 用 inset 阴影而不是 border：border 会占掉尺寸、把图挤小。
+     0.5px 在高分屏上就是一条发丝线。 */
+  .av.ring {
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .5),
+                0 0 0 1px rgba(120, 130, 145, .18);
+  }
+
+  /* ---- C 描边 + 很淡的底色 ---- */
+  /* 底色用半透明白，让头像有一点"承托"，
+     同时不会在浅色主题上显得突兀。 */
+  .av.ring-bg {
+    background: rgba(255, 255, 255, .10);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .45),
+                0 0 0 1px rgba(120, 130, 145, .16);
+  }
+
+  /* ---- D 略微压暗 ---- */
+  /* 降低亮度、提高对比，让浅色部分不那么"发光"。
+     不动背景，所以不会有白边问题。 */
+  .av.dim { filter: brightness(.93) contrast(1.1) saturate(1.05); }
+</style>
+</head>
+<body>
+  <h1>深色主题下的头像处理 —— 4 种方案</h1>
+  <div class="note">
+    角色是银发 + 白衬衫 + 淡紫，整体很浅。透明背景在深色界面上**缺一圈边界**，
+    看起来像浮着。<br>
+    下面每种方案都画了<b>浅色和深色</b>、以及<b>三种实际尺寸</b>。
+    <b>重点看 32px 那栏</b>——描边在小尺寸下会不会太抢、会不会糊。<br>
+    请告诉我用哪个（A / B / C / D，或者"深色用 B、浅色用 A"这种组合）。
+  </div>
+
+  <h2>A · 不加处理（当前）</h2><div class="note">透明背景，深浅主题一个样。基准方案。</div><div class="panels"><div class="panel light"><div class="panel-head">浅色 · 气泡 32px</div><div class="cells"><div class="cell"><img class="av " src="icons/01_嗯.webp" alt="01_嗯" style="width:32px;height:32px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av " src="icons/02_好耶.webp" alt="02_好耶" style="width:32px;height:32px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av " src="icons/03_睡觉.webp" alt="03_睡觉" style="width:32px;height:32px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av " src="icons/04_疑惑.webp" alt="04_疑惑" style="width:32px;height:32px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av " src="icons/05_哼.webp" alt="05_哼" style="width:32px;height:32px"><span class="cap">05_哼</span></div></div></div><div class="panel light"><div class="panel-head">浅色 · 首屏 56px</div><div class="cells"><div class="cell"><img class="av " src="icons/01_嗯.webp" alt="01_嗯" style="width:56px;height:56px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av " src="icons/02_好耶.webp" alt="02_好耶" style="width:56px;height:56px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av " src="icons/03_睡觉.webp" alt="03_睡觉" style="width:56px;height:56px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av " src="icons/04_疑惑.webp" alt="04_疑惑" style="width:56px;height:56px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av " src="icons/05_哼.webp" alt="05_哼" style="width:56px;height:56px"><span class="cap">05_哼</span></div></div></div><div class="panel light"><div class="panel-head">浅色 · 空状态 72px</div><div class="cells"><div class="cell"><img class="av " src="icons/01_嗯.webp" alt="01_嗯" style="width:72px;height:72px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av " src="icons/02_好耶.webp" alt="02_好耶" style="width:72px;height:72px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av " src="icons/03_睡觉.webp" alt="03_睡觉" style="width:72px;height:72px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av " src="icons/04_疑惑.webp" alt="04_疑惑" style="width:72px;height:72px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av " src="icons/05_哼.webp" alt="05_哼" style="width:72px;height:72px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 气泡 32px</div><div class="cells"><div class="cell"><img class="av " src="icons/01_嗯.webp" alt="01_嗯" style="width:32px;height:32px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av " src="icons/02_好耶.webp" alt="02_好耶" style="width:32px;height:32px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av " src="icons/03_睡觉.webp" alt="03_睡觉" style="width:32px;height:32px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av " src="icons/04_疑惑.webp" alt="04_疑惑" style="width:32px;height:32px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av " src="icons/05_哼.webp" alt="05_哼" style="width:32px;height:32px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 首屏 56px</div><div class="cells"><div class="cell"><img class="av " src="icons/01_嗯.webp" alt="01_嗯" style="width:56px;height:56px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av " src="icons/02_好耶.webp" alt="02_好耶" style="width:56px;height:56px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av " src="icons/03_睡觉.webp" alt="03_睡觉" style="width:56px;height:56px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av " src="icons/04_疑惑.webp" alt="04_疑惑" style="width:56px;height:56px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av " src="icons/05_哼.webp" alt="05_哼" style="width:56px;height:56px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 空状态 72px</div><div class="cells"><div class="cell"><img class="av " src="icons/01_嗯.webp" alt="01_嗯" style="width:72px;height:72px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av " src="icons/02_好耶.webp" alt="02_好耶" style="width:72px;height:72px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av " src="icons/03_睡觉.webp" alt="03_睡觉" style="width:72px;height:72px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av " src="icons/04_疑惑.webp" alt="04_疑惑" style="width:72px;height:72px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av " src="icons/05_哼.webp" alt="05_哼" style="width:72px;height:72px"><span class="cap">05_哼</span></div></div></div></div>
+  <h2>B · 极细浅色描边</h2><div class="note">1px 的 rgba(255,255,255,.5) 内描边 + 极淡的外描边。深色下有边界，浅色下几乎看不出。</div><div class="panels"><div class="panel light"><div class="panel-head">浅色 · 气泡 32px</div><div class="cells"><div class="cell"><img class="av ring" src="icons/01_嗯.webp" alt="01_嗯" style="width:32px;height:32px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring" src="icons/02_好耶.webp" alt="02_好耶" style="width:32px;height:32px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:32px;height:32px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:32px;height:32px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring" src="icons/05_哼.webp" alt="05_哼" style="width:32px;height:32px"><span class="cap">05_哼</span></div></div></div><div class="panel light"><div class="panel-head">浅色 · 首屏 56px</div><div class="cells"><div class="cell"><img class="av ring" src="icons/01_嗯.webp" alt="01_嗯" style="width:56px;height:56px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring" src="icons/02_好耶.webp" alt="02_好耶" style="width:56px;height:56px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:56px;height:56px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:56px;height:56px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring" src="icons/05_哼.webp" alt="05_哼" style="width:56px;height:56px"><span class="cap">05_哼</span></div></div></div><div class="panel light"><div class="panel-head">浅色 · 空状态 72px</div><div class="cells"><div class="cell"><img class="av ring" src="icons/01_嗯.webp" alt="01_嗯" style="width:72px;height:72px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring" src="icons/02_好耶.webp" alt="02_好耶" style="width:72px;height:72px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:72px;height:72px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:72px;height:72px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring" src="icons/05_哼.webp" alt="05_哼" style="width:72px;height:72px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 气泡 32px</div><div class="cells"><div class="cell"><img class="av ring" src="icons/01_嗯.webp" alt="01_嗯" style="width:32px;height:32px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring" src="icons/02_好耶.webp" alt="02_好耶" style="width:32px;height:32px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:32px;height:32px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:32px;height:32px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring" src="icons/05_哼.webp" alt="05_哼" style="width:32px;height:32px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 首屏 56px</div><div class="cells"><div class="cell"><img class="av ring" src="icons/01_嗯.webp" alt="01_嗯" style="width:56px;height:56px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring" src="icons/02_好耶.webp" alt="02_好耶" style="width:56px;height:56px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:56px;height:56px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:56px;height:56px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring" src="icons/05_哼.webp" alt="05_哼" style="width:56px;height:56px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 空状态 72px</div><div class="cells"><div class="cell"><img class="av ring" src="icons/01_嗯.webp" alt="01_嗯" style="width:72px;height:72px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring" src="icons/02_好耶.webp" alt="02_好耶" style="width:72px;height:72px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:72px;height:72px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:72px;height:72px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring" src="icons/05_哼.webp" alt="05_哼" style="width:72px;height:72px"><span class="cap">05_哼</span></div></div></div></div>
+  <h2>C · 描边 + 淡淡底色</h2><div class="note">在 B 的基础上加 10% 白色的底，头像有「承托」，但浅色主题上可能显得脏。</div><div class="panels"><div class="panel light"><div class="panel-head">浅色 · 气泡 32px</div><div class="cells"><div class="cell"><img class="av ring-bg" src="icons/01_嗯.webp" alt="01_嗯" style="width:32px;height:32px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/02_好耶.webp" alt="02_好耶" style="width:32px;height:32px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:32px;height:32px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:32px;height:32px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/05_哼.webp" alt="05_哼" style="width:32px;height:32px"><span class="cap">05_哼</span></div></div></div><div class="panel light"><div class="panel-head">浅色 · 首屏 56px</div><div class="cells"><div class="cell"><img class="av ring-bg" src="icons/01_嗯.webp" alt="01_嗯" style="width:56px;height:56px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/02_好耶.webp" alt="02_好耶" style="width:56px;height:56px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:56px;height:56px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:56px;height:56px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/05_哼.webp" alt="05_哼" style="width:56px;height:56px"><span class="cap">05_哼</span></div></div></div><div class="panel light"><div class="panel-head">浅色 · 空状态 72px</div><div class="cells"><div class="cell"><img class="av ring-bg" src="icons/01_嗯.webp" alt="01_嗯" style="width:72px;height:72px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/02_好耶.webp" alt="02_好耶" style="width:72px;height:72px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:72px;height:72px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:72px;height:72px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/05_哼.webp" alt="05_哼" style="width:72px;height:72px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 气泡 32px</div><div class="cells"><div class="cell"><img class="av ring-bg" src="icons/01_嗯.webp" alt="01_嗯" style="width:32px;height:32px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/02_好耶.webp" alt="02_好耶" style="width:32px;height:32px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:32px;height:32px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:32px;height:32px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/05_哼.webp" alt="05_哼" style="width:32px;height:32px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 首屏 56px</div><div class="cells"><div class="cell"><img class="av ring-bg" src="icons/01_嗯.webp" alt="01_嗯" style="width:56px;height:56px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/02_好耶.webp" alt="02_好耶" style="width:56px;height:56px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:56px;height:56px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:56px;height:56px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/05_哼.webp" alt="05_哼" style="width:56px;height:56px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 空状态 72px</div><div class="cells"><div class="cell"><img class="av ring-bg" src="icons/01_嗯.webp" alt="01_嗯" style="width:72px;height:72px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/02_好耶.webp" alt="02_好耶" style="width:72px;height:72px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:72px;height:72px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:72px;height:72px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av ring-bg" src="icons/05_哼.webp" alt="05_哼" style="width:72px;height:72px"><span class="cap">05_哼</span></div></div></div></div>
+  <h2>D · 略微压暗</h2><div class="note">brightness(.93) + contrast(1.1)。不动背景，浅色部分不那么刺眼，但深色下的「浮」还在。</div><div class="panels"><div class="panel light"><div class="panel-head">浅色 · 气泡 32px</div><div class="cells"><div class="cell"><img class="av dim" src="icons/01_嗯.webp" alt="01_嗯" style="width:32px;height:32px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av dim" src="icons/02_好耶.webp" alt="02_好耶" style="width:32px;height:32px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av dim" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:32px;height:32px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av dim" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:32px;height:32px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av dim" src="icons/05_哼.webp" alt="05_哼" style="width:32px;height:32px"><span class="cap">05_哼</span></div></div></div><div class="panel light"><div class="panel-head">浅色 · 首屏 56px</div><div class="cells"><div class="cell"><img class="av dim" src="icons/01_嗯.webp" alt="01_嗯" style="width:56px;height:56px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av dim" src="icons/02_好耶.webp" alt="02_好耶" style="width:56px;height:56px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av dim" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:56px;height:56px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av dim" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:56px;height:56px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av dim" src="icons/05_哼.webp" alt="05_哼" style="width:56px;height:56px"><span class="cap">05_哼</span></div></div></div><div class="panel light"><div class="panel-head">浅色 · 空状态 72px</div><div class="cells"><div class="cell"><img class="av dim" src="icons/01_嗯.webp" alt="01_嗯" style="width:72px;height:72px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av dim" src="icons/02_好耶.webp" alt="02_好耶" style="width:72px;height:72px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av dim" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:72px;height:72px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av dim" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:72px;height:72px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av dim" src="icons/05_哼.webp" alt="05_哼" style="width:72px;height:72px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 气泡 32px</div><div class="cells"><div class="cell"><img class="av dim" src="icons/01_嗯.webp" alt="01_嗯" style="width:32px;height:32px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av dim" src="icons/02_好耶.webp" alt="02_好耶" style="width:32px;height:32px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av dim" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:32px;height:32px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av dim" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:32px;height:32px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av dim" src="icons/05_哼.webp" alt="05_哼" style="width:32px;height:32px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 首屏 56px</div><div class="cells"><div class="cell"><img class="av dim" src="icons/01_嗯.webp" alt="01_嗯" style="width:56px;height:56px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av dim" src="icons/02_好耶.webp" alt="02_好耶" style="width:56px;height:56px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av dim" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:56px;height:56px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av dim" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:56px;height:56px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av dim" src="icons/05_哼.webp" alt="05_哼" style="width:56px;height:56px"><span class="cap">05_哼</span></div></div></div><div class="panel dark"><div class="panel-head">深色 · 空状态 72px</div><div class="cells"><div class="cell"><img class="av dim" src="icons/01_嗯.webp" alt="01_嗯" style="width:72px;height:72px"><span class="cap">01_嗯</span></div>
+<div class="cell"><img class="av dim" src="icons/02_好耶.webp" alt="02_好耶" style="width:72px;height:72px"><span class="cap">02_好耶</span></div>
+<div class="cell"><img class="av dim" src="icons/03_睡觉.webp" alt="03_睡觉" style="width:72px;height:72px"><span class="cap">03_睡觉</span></div>
+<div class="cell"><img class="av dim" src="icons/04_疑惑.webp" alt="04_疑惑" style="width:72px;height:72px"><span class="cap">04_疑惑</span></div>
+<div class="cell"><img class="av dim" src="icons/05_哼.webp" alt="05_哼" style="width:72px;height:72px"><span class="cap">05_哼</span></div></div></div></div>
+
+  <h2>建议</h2>
+  <div class="note">
+    我倾向 <b>深色用 B、浅色用 A</b>——用 CSS 的 <code>[data-theme=dark]</code>
+    分别控制，图片本身只存一份。<br>
+    D 可以叠加在任何一个方案上，如果觉得银发在深色下太亮，就在 B 之上再加 D。
+  </div>
+</body>
+</html>

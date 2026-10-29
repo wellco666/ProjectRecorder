@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>项目记录器 —— 配色预览</title>
+<style>
+  :root {
+    --bg-win:      #f4f5f7;
+    --bg-panel:    #ffffff;
+    --bg-read:     #fafbfc;
+    --fg:          #2f3540;
+    --fg-strong:   #1b2028;
+    --fg-soft:     #4d5563;
+    --fg-dim:      #78828f;
+    --fg-faint:    #a2aab5;
+    --line:        #e3e6ea;
+    --line-hair:   #f1f3f5;
+    --accent:      #7c93ad;
+    --accent-dim:  #5f7893;
+    --accent-wash: #e9eef4;
+    --accent-edge: #b6c5d4;
+    --hover:       #eef1f4;
+    --track:       #eceef1;
+    --scroll:      #d5d9df;
+    --ok:          #6f9a78;
+    --watch:       #c0a860;
+    --risk:        #c08457;
+    --severe:      #a8606a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px;
+    background: #e6e8ec;
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    color: var(--fg); font-size: 13.5px;
+  }
+  h1 { font-size: 15px; margin: 0 0 4px; color: var(--fg-strong); }
+  .note { color: var(--fg-dim); font-size: 12px; margin-bottom: 20px; }
+
+  .app {
+    width: 1120px; max-width: 100%;
+    background: var(--bg-win); border-radius: 10px;
+    box-shadow: 0 6px 26px rgba(40, 48, 60, .16);
+    overflow: hidden; margin-bottom: 30px;
+  }
+
+  /* 菜单栏 + 顶栏 */
+  .menubar {
+    background: var(--bg-panel); display: flex; gap: 2px;
+    padding: 3px 8px; font-size: 12.5px; color: var(--fg-soft);
+  }
+  .menubar span { padding: 5px 10px; border-radius: 6px; }
+  .menubar span:first-child { background: var(--hover); color: var(--fg); }
+
+  .toolbar {
+    background: var(--bg-panel); display: flex; align-items: center;
+    gap: 10px; padding: 10px 18px;
+  }
+  .tool-title { font-size: 15px; font-weight: 600; color: var(--fg-strong); }
+  .tool-meta  { font-size: 12px; color: var(--fg-dim); }
+  .spacer { flex: 1; }
+
+  .badge {
+    padding: 2px 10px; border-radius: 9px; font-size: 11.5px;
+    font-weight: 600; color: #fff;
+  }
+  .badge.risk { background: var(--risk); }
+
+  .primary {
+    background: var(--accent); color: #fff; border: none;
+    border-radius: 8px; padding: 9px 20px; font-size: 13px; font-weight: 500;
+  }
+  .ghost {
+    background: transparent; color: var(--fg-soft);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 16px; font-size: 12.5px;
+  }
+  .danger {
+    background: transparent; color: #b06a5a;
+    border: 1px solid var(--accent-edge); border-radius: 8px;
+    padding: 8px 16px; font-size: 12.5px;
+  }
+  .tbtn {
+    background: transparent; color: var(--fg-soft);
+    border: 1px solid transparent; border-radius: 7px;
+    padding: 6px 14px; font-size: 12.5px;
+  }
+  .tbtn:hover { background: var(--hover); color: var(--fg); }
+  .tbtn.on {
+    background: var(--accent-wash); border-color: var(--accent-edge);
+    color: var(--accent-dim); font-weight: 600;
+  }
+
+  /* 主选项卡 */
+  .roottabs {
+    background: var(--bg-panel); display: flex; gap: 2px;
+    padding: 8px 12px 0;
+  }
+  .roottabs b {
+    background: var(--bg-win); color: var(--fg-strong); font-weight: 600;
+    padding: 10px 22px; border-radius: 10px 10px 0 0;
+  }
+  .roottabs i {
+    font-style: normal; color: var(--fg-dim); padding: 10px 22px;
+  }
+
+  /* 内容区 */
+  .body { padding: 16px 18px 14px; }
+
+  /* 指标卡 */
+  .cards { display: flex; gap: 12px; margin-bottom: 16px; }
+  .card {
+    flex: 1; background: var(--bg-panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 16px;
+  }
+  .card .t { font-size: 12px; font-weight: 600; color: var(--fg-dim); }
+  .card .v {
+    font-size: 22px; font-weight: 600; color: var(--fg-strong);
+    margin-top: 2px;
+  }
+  .card .v small { font-size: 12px; color: var(--fg-dim); font-weight: 400; }
+  .card .n { font-size: 12px; color: var(--fg-dim); margin-top: 2px; }
+  .card .v.risk { color: var(--risk); }
+
+  /* 区块标题：粉色短竖线换成蓝色（这里用左边框模拟） */
+  .sect {
+    font-size: 13px; font-weight: 600; color: var(--fg);
+    margin: 0 0 10px;
+  }
+
+  /* 表格 */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; font-size: 12px; font-weight: 600;
+    color: var(--fg-dim); padding: 8px 6px;
+    border-bottom: 1px solid var(--line);
+  }
+  td {
+    padding: 7px 6px; border-bottom: 1px solid var(--line-hair);
+  }
+  td.c { text-align: center; }
+  tr:hover td { background: var(--hover); }
+  tr.on td { background: var(--accent-wash); }
+  .lv { font-weight: 600; }
+  .lv.ok { color: var(--ok); }
+  .lv.watch { color: var(--watch); }
+  .lv.risk { color: var(--risk); }
+  .lv.severe { color: var(--severe); }
+
+  /* 预测结论区 */
+  .advice {
+    background: var(--bg-read); border: 1px solid #e8ebef;
+    border-radius: 10px; padding: 14px 18px; margin-top: 16px;
+  }
+  .advice .head {
+    font-size: 14px; font-weight: 600; color: var(--severe);
+    margin-bottom: 6px;
+  }
+  .advice .r { font-size: 12.5px; color: #333a45; line-height: 1.7; }
+  .advice .a {
+    font-size: 12.5px; color: var(--accent-dim);
+    margin-top: 8px; line-height: 1.7;
+  }
+
+  /* 状态栏 */
+  .status {
+    background: var(--bg-panel); border-top: 1px solid var(--line);
+    padding: 7px 18px; display: flex; gap: 12px; font-size: 12px;
+    color: var(--fg-soft);
+  }
+  .status .dim { color: var(--fg-dim); }
+  .status .hint { margin-left: auto; font-size: 11px; color: var(--fg-faint); }
+
+  /* 色板 */
+  .swatches { display: flex; flex-wrap: wrap; gap: 10px; max-width: 1120px; }
+  .sw {
+    width: 130px; border-radius: 8px; overflow: hidden;
+    border: 1px solid #d5d8dd; background: #fff;
+  }
+  .sw .cap { height: 44px; }
+  .sw .lbl { padding: 6px 8px; font-size: 11px; color: var(--fg-soft); line-height: 1.5; }
+  .sw code { font-size: 10.5px; color: var(--fg-faint); }
+</style>
+</head>
+<body>
+
+<h1>项目记录器 —— 新配色预览</h1>
+<div class="note">
+  纯 HTML 还原，对照 <code>theme.py</code> 的 LIGHT 调色板。
+  结构沿用「墨读」，颜色是这套项目自己的：清冷蓝灰 + 低饱和石青，
+  风险四色降饱和，避免一屏红黄绿像交通灯。
+</div>
+
+<div class="app">
+  <div class="menubar"><span>文件</span><span>视图</span><span>帮助</span></div>
+
+  <div class="toolbar">
+    <span class="tool-title">项目记录器</span>
+    <span class="tool-meta">项目进度 · 人力 · 风险预测</span>
+    <span class="spacer"></span>
+    <span class="badge risk">2 个需处理</span>
+    <span class="primary">新建项目</span>
+  </div>
+
+  <div class="roottabs"><b>驾驶舱</b><i>员工与工时</i><i>任务分配</i></div>
+
+  <div class="body">
+    <div class="cards">
+      <div class="card">
+        <div class="t">在管项目</div>
+        <div class="v">3 <small>个</small></div>
+        <div class="n">其中进行中 2 个</div>
+      </div>
+      <div class="card">
+        <div class="t">需要处理</div>
+        <div class="v risk">2 <small>个</small></div>
+        <div class="n">有项目需要介入</div>
+      </div>
+      <div class="card">
+        <div class="t">在岗员工</div>
+        <div class="v">4 <small>人</small></div>
+        <div class="n">共 5 人在岗</div>
+      </div>
+      <div class="card">
+        <div class="t">本周工时</div>
+        <div class="v">126 <small>小时</small></div>
+        <div class="n">最近 7 天</div>
+      </div>
+    </div>
+
+    <div class="sect">项目一览</div>
+    <table>
+      <tr>
+        <th>项目</th><th>负责人</th><th>状态</th><th>风险</th>
+        <th style="text-align:center">进度</th>
+        <th style="text-align:center">剩余天数</th>
+        <th style="text-align:center">预算使用</th>
+        <th style="text-align:center">投入工时</th>
+        <th style="text-align:center">人数</th>
+      </tr>
+      <tr class="on">
+        <td>智慧园区二期</td><td>李工</td><td>进行中</td>
+        <td class="lv severe">严重</td>
+        <td class="c">35%</td><td class="c">超期 5 天</td>
+        <td class="c">88%</td><td class="c">142.5</td><td class="c">3 人</td>
+      </tr>
+      <tr>
+        <td>内部数据看板</td><td>赵敏</td><td>进行中</td>
+        <td class="lv ok">健康</td>
+        <td class="c">55%</td><td class="c">35 天</td>
+        <td class="c">33%</td><td class="c">68.0</td><td class="c">2 人</td>
+      </tr>
+      <tr>
+        <td>官网改版</td><td>王强</td><td>已交付</td>
+        <td class="lv ok">健康</td>
+        <td class="c">100%</td><td class="c">已交付</td>
+        <td class="c">95%</td><td class="c">96.0</td><td class="c">1 人</td>
+      </tr>
+      <tr>
+        <td>供应链对账</td><td>陈鹏</td><td>规划中</td>
+        <td class="lv watch">关注</td>
+        <td class="c">10%</td><td class="c">60 天</td>
+        <td class="c">5%</td><td class="c">6.0</td><td class="c">1 人</td>
+      </tr>
+    </table>
+
+    <div class="advice">
+      <div class="head">【严重】按当前速度，预计 2026年04月18日 才能收尾，比计划晚 27 天</div>
+      <div class="r">
+        · 预计延期 27 天　（已过 60 天完成 35%，按此速度还需约 111 天，而计划只剩 20 天）<br>
+        · 时间用掉 75%，进度只有 35%　（落后 40 个百分点）<br>
+        · 2 个步骤处于「已阻塞」　（接口联调、灰度发布）<br>
+        · 计划工时超出可用产能 38%　（计划 210 小时，3 人剩余产能约 152 小时）<br>
+        · 预算已用掉 88%　（预算 80.0 万，已花 70.0 万，剩余 10.0 万）
+      </div>
+      <div class="a">
+        建议：<br>
+        · 先解开阻塞——阻塞不解决，加人也没用<br>
+        · 要么砍范围，要么加人，否则只能靠加班顶<br>
+        · 核对超支科目，必要时追加预算或砍掉低价值范围
+      </div>
+    </div>
+  </div>
+
+  <div class="status">
+    <span>数据库：C:\Users\cj\ProjectRecorder\projects.db</span>
+    <span class="dim">3 个项目 · 2 个需要处理</span>
+    <span class="hint">Ctrl+N 新建　Ctrl+R 刷新　Ctrl+E 导出　F1 说明</span>
+  </div>
+</div>
+
+<h1 style="margin-top:0">色板</h1>
+<div class="swatches">
+  <div class="sw"><div class="cap" style="background:#f4f5f7"></div>
+    <div class="lbl">窗口底<br><code>#f4f5f7</code></div></div>
+  <div class="sw"><div class="cap" style="background:#ffffff"></div>
+    <div class="lbl">面板 / 卡片<br><code>#ffffff</code></div></div>
+  <div class="sw"><div class="cap" style="background:#fafbfc"></div>
+    <div class="lbl">结论区<br><code>#fafbfc</code></div></div>
+  <div class="sw"><div class="cap" style="background:#2f3540"></div>
+    <div class="lbl">正文<br><code>#2f3540</code></div></div>
+  <div class="sw"><div class="cap" style="background:#78828f"></div>
+    <div class="lbl">说明文字<br><code>#78828f</code></div></div>
+  <div class="sw"><div class="cap" style="background:#7c93ad"></div>
+    <div class="lbl">强调色<br><code>#7c93ad</code></div></div>
+  <div class="sw"><div class="cap" style="background:#e9eef4"></div>
+    <div class="lbl">选中底色<br><code>#e9eef4</code></div></div>
+  <div class="sw"><div class="cap" style="background:#b6c5d4"></div>
+    <div class="lbl">描边<br><code>#b6c5d4</code></div></div>
+  <div class="sw"><div class="cap" style="background:#6f9a78"></div>
+    <div class="lbl">健康<br><code>#6f9a78</code></div></div>
+  <div class="sw"><div class="cap" style="background:#c0a860"></div>
+    <div class="lbl">关注<br><code>#c0a860</code></div></div>
+  <div class="sw"><div class="cap" style="background:#c08457"></div>
+    <div class="lbl">风险<br><code>#c08457</code></div></div>
+  <div class="sw"><div class="cap" style="background:#a8606a"></div>
+    <div class="lbl">严重<br><code>#a8606a</code></div></div>
+</div>
+
+</body>
+</html>

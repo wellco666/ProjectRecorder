@@ -1,0 +1,13 @@
+﻿签名证书指纹（华为 / 荣耀 注册时要填）
+
+SHA-256   FF:FF:05:3C:F6:C3:2E:7C:BE:3E:7C:3D:6C:23:E6:F0:7C:3A:FD:6F:3F:10:99:95:E5:81:B4:B5:1C:57:C4:50
+SHA-1     01:F4:83:76:31:A0:50:89:53:F8:92:B9:B6:CE:7B:BB:0B:82:B8:54
+
+包名      com.cj.projectrecorder
+别名      projectrecorder
+有效期    10000 天
+
+密钥库    android\app\release.keystore
+凭据      android\app\keystore.properties
+
+**这两个文件务必备份，丢了就永远发不了这个 App 的更新。**

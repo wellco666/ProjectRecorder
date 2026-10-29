@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>登录页交互测试（开发用）</title>
+<style>
+  body { font-family: Consolas, monospace; font-size: 13px; padding: 12px; margin: 0; }
+  .pass { color: #1a7f37; } .fail { color: #b42318; font-weight: bold; }
+  pre { background: #f6f8fa; padding: 10px; white-space: pre-wrap; line-height: 1.5; }
+  iframe { width: 360px; height: 640px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>登录页交互测试</h1>
+<pre id="out">运行中…</pre>
+<iframe id="app" src="index.html"></iframe>
+<script>
+const lines = [];
+let failed = 0;
+const log = s => { lines.push(s); document.getElementById('out').innerHTML =
+  (failed ? '<span class="fail">失败 ' + failed + ' 项</span>' : '<span class="pass">全部通过</span>')
+  + '<pre>' + lines.join('\n') + '</pre>'; };
+function check(label, cond, detail) {
+  if (cond) log('PASS  ' + label);
+  else { failed += 1; log('FAIL  ' + label + (detail ? '  —— ' + detail : '')); }
+}
+
+document.getElementById('app').addEventListener('load', () => {
+  setTimeout(() => {
+    const w = document.getElementById('app').contentWindow;
+    const d = w.document;
+
+    /* 1. **身份选择：要在。**
+
+       我一度把它删掉改成"自动判断身份"，但用户指出
+       **老板和员工得能一眼分清**——按钮摆在那里比一句话清楚。
+       所以按钮回来了，同时保留兜底（选错了也还能登）。
+
+       这里检查：按钮在、能点、点了会换 label。 */
+    const roleBox = d.getElementById('login-role');
+    check('身份按钮在', !!roleBox);
+    const buttons = roleBox
+      ? Array.from(roleBox.querySelectorAll('[data-role]')) : [];
+    check('有老板和员工两个按钮', buttons.length === 2,
+      '实际 ' + buttons.length + ' 个');
+
+    const label = d.getElementById('login-code-label');
+    if (buttons.length === 2) {
+      check('老板按钮有 onclick', typeof buttons[0].onclick === 'function');
+      check('员工按钮有 onclick', typeof buttons[1].onclick === 'function');
+      check('初始选中的是老板', buttons[0].classList.contains('on'),
+        buttons[0].className);
+
+      /* 切到员工：label 要变成「工号」 */
+      buttons[1].click();
+      check('点员工后高亮切过去',
+        buttons[1].classList.contains('on')
+        && !buttons[0].classList.contains('on'),
+        '老板=' + buttons[0].className + ' 员工=' + buttons[1].className);
+      check('点员工后 label 变成「工号」', label.textContent === '工号',
+        label.textContent);
+      check('内部 loginRole 变成 employee',
+        w.eval('loginRole') === 'employee', String(w.eval('loginRole')));
+
+      /* 切回老板 */
+      buttons[0].click();
+      check('点回老板后 label 变回「手机号」',
+        label.textContent === '手机号', label.textContent);
+      check('内部 loginRole 变回 boss',
+        w.eval('loginRole') === 'boss', String(w.eval('loginRole')));
+
+      /* 反复点不能出错（这里是历史上有过的"死按钮"问题） */
+      try {
+        for (let i = 0; i < 6; i += 1) buttons[i % 2].click();
+        check('反复点身份按钮不抛错', true);
+      } catch (error) {
+        check('反复点身份按钮不抛错', false, error.message);
+      }
+      /* 点完回到老板态，后面的检查才稳定 */
+      if (w.eval('loginRole') !== 'boss') buttons[0].click();
+    }
+
+    /* 2. **登录页上被删掉的三样**（用户要求去掉）。
+
+       两个按钮和一句"员工不用注册"的说明。
+       本机模式本身还在，只是不再摆按钮强调。 */
+    check('没有「云服务设置」按钮',
+      !d.getElementById('btn-cloud-settings'));
+    check('没有「先不登录，只用本机功能」按钮',
+      !d.getElementById('btn-offline'));
+    check('没有「员工不用注册」那句说明',
+      !d.getElementById('login-hint'));
+
+    /* 3. 输入框是干净的（用户要求去掉那些"例如…"示例） */
+    check('输入框没有 placeholder',
+      !d.getElementById('login-code').placeholder,
+      JSON.stringify(d.getElementById('login-code').placeholder));
+
+    /* 4. 忘了密码的入口 */
+    const forgot = d.getElementById('btn-forgot');
+    check('有「忘了密码」按钮', !!forgot);
+    if (forgot) {
+      check('「忘了密码」有 onclick', typeof forgot.onclick === 'function');
+      forgot.click();
+      const sheet = d.getElementById('sheet');
+      check('点「忘了密码」弹出了说明',
+        sheet && !sheet.classList.contains('hidden'));
+      check('标题是「忘了密码」',
+        d.getElementById('sheet-title').textContent.trim() === '忘了密码',
+        d.getElementById('sheet-title').textContent.trim());
+      /* 弹层里要说清"员工找老板、老板用另一台" */
+      const body = d.getElementById('sheet-body').textContent;
+      check('说明里提到了员工找老板',
+        body.indexOf('老板') !== -1, body.slice(0, 60));
+      const closeBtn = d.querySelector('#sheet-foot .btn');
+      if (closeBtn) closeBtn.click();
+    }
+
+    /* 7. URL 规整化（这次错误横幅的元凶） */
+    const urlCases = [
+      ['https://x.supabase.co/rest/v1/', 'https://x.supabase.co'],
+      ['https://x.supabase.co/rest/v1', 'https://x.supabase.co'],
+      ['  https://x.supabase.co  ', 'https://x.supabase.co'],
+      ['https://x.supabase.co/', 'https://x.supabase.co'],
+      ['x.supabase.co', 'https://x.supabase.co'],
+      ['https://x.supabase.co/auth/v1', 'https://x.supabase.co'],
+    ];
+    urlCases.forEach(([input, expect]) => {
+      const got = w.normalizeCloudUrl ? w.normalizeCloudUrl(input) : '(函数不存在)';
+      check('规整化 ' + JSON.stringify(input), got === expect,
+        '期望 ' + expect + '，实际 ' + got);
+    });
+
+    /* 8. 空配置时给出可读的提示 */
+    if (w.normalizeCloudUrl) {
+      check('空字符串规整成空', w.normalizeCloudUrl('') === '');
+      check('非 http 开头会补协议',
+        w.normalizeCloudUrl('abc.supabase.co') === 'https://abc.supabase.co');
+    }
+
+    /* 9. 老板自助注册入口 */
+    const regBtn = d.getElementById('btn-register-boss');
+    check('登录页有「创建老板账号」按钮', !!regBtn);
+    if (regBtn) {
+      check('按钮文字提到了老板账号',
+        regBtn.textContent.indexOf('老板账号') !== -1,
+        regBtn.textContent.trim());
+      check('注册按钮有 onclick', typeof regBtn.onclick === 'function');
+      if (typeof regBtn.onclick === 'function') {
+        regBtn.click();
+        const sheet = d.getElementById('sheet');
+        check('点注册弹出了表单',
+          sheet && !sheet.classList.contains('hidden'));
+        const title = d.getElementById('sheet-title').textContent.trim();
+        check('表单标题是「创建老板账号」', title === '创建老板账号', title);
+        check('表单有手机号输入框', !!d.getElementById('rg-phone'));
+        check('表单有姓名输入框', !!d.getElementById('rg-name'));
+        check('表单有密码输入框', !!d.getElementById('rg-password'));
+        check('表单有错误提示区', !!d.getElementById('rg-error'));
+        /* 关掉，免得影响后面的检查 */
+        const closeBtn = d.querySelector('#sheet-foot .btn');
+        if (closeBtn) closeBtn.click();
+      }
+    }
+
+    /* 10. 报错翻译（注册失败要给中文说明）
+
+       注意这里**不再有"已经有老板了"这一条**：
+       现在是每个老板都能建自己的账号，服务端不会因为
+       "已经有老板"而拒绝了。 */
+    if (typeof w.translateBossError === 'function') {
+      const cases = [
+        ['code may only contain letters', '手机号只能用'],
+        ['password must be at least 6 characters', '密码至少要 6 位'],
+        ['too many accounts already use the name', '换一个吧'],
+        /* 文件名要跟实际存在的对上。我把三个 SQL 合并成
+           migrate-notify.sql 之后，报错文案也跟着改了——
+           这条断言原来找的是 multi-boss.sql，会失败。 */
+        ['Could not find the function', 'migrate-notify.sql'],
+      ];
+      cases.forEach(([raw, expect]) => {
+        const got = w.translateBossError(raw);
+        check('报错翻译：' + raw.slice(0, 24),
+          got.indexOf(expect) !== -1, got.slice(0, 60));
+      });
+    } else {
+      check('translateBossError 存在', false, '函数没定义');
+    }
+
+    /* 11. 注册用的是新的多老板函数，不是旧的单老板函数 */
+    const registerSource = String(w.registerBoss);
+    check('注册调用的是 create_boss_account（多老板版）',
+      registerSource.indexOf('create_boss_account') !== -1,
+      registerSource.slice(0, 120));
+    check('不再调用已被删除的 create_first_boss',
+      registerSource.indexOf('create_first_boss') === -1);
+
+    log('');
+    log('--- 完成 ---');
+  }, 900);
+});
+</script>
+</body>
+</html>

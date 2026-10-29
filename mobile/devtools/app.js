@@ -1,0 +1,2125 @@
+/* =============================================================
+   主程序：页面切换、渲染、表单、计时、导航。
+
+   组织方式：
+     · 一个 showPage() 管页面切换，每页一个 render 函数
+     · 表单统一走 openSheet()，避免每个功能写一套弹层
+     · 渲染函数只读 DB 和 calc，不自己算东西
+
+   错误处理：
+     手机上没法看 Console，所以任何异常都要**显示在页面上**。
+     顶层的 window.onerror 兜住漏出来的错误，
+     表单里的错误就近用 toast 提示。
+   ============================================================ */
+"use strict";
+
+/* ---------------------------------------------------------- 启动 */
+window.addEventListener("error", event => {
+  showBootError("出错了", (event.error && event.error.stack)
+    || event.message || String(event));
+});
+
+function showBootError(title, detail) {
+  const box = document.getElementById("boot-error");
+  box.innerHTML = "<b>" + escapeHtml(title) + "</b>"
+    + escapeHtml(String(detail || ""));
+  box.classList.remove("hidden");
+}
+
+function boot() {
+  DB = loadAll();
+  applyTheme(getSetting("theme", "light"));
+  makeNavScrollable();
+  bindGlobalEvents();
+
+  /* 进哪个页面：
+
+       登录了        → 员工进任务页，老板进看板
+       没登录        → **一律进登录页**
+
+     ## 为什么没配云服务也要进登录页
+
+     我原来的逻辑是"没配云服务就直接进看板（单机模式）"，
+     想的是"别拿登录页烦只想本地记事的用户"。
+
+     但那样有个死循环：**配置云服务的入口就在登录页上**，
+     不进登录页就配不了，配不了就永远不进登录页。
+     结果用户装了之后完全看不到账号功能，以为没做。
+
+     现在改成一律进登录页，那里有：
+       · 身份选择（老板 / 员工）—— 这样区分一眼就能看到
+       · 云服务设置入口
+       · 「先不登录，只用本机功能」的出口
+
+     **离线也要能进主界面**：DB.profile 是本地副本，
+     所以没网时已经登录过的人不会被挡在门外。 */
+  const status = syncStatus();
+  if (status.signedIn) {
+    resumeSession();
+    showPage(status.role === "employee" ? "tasks" : "dash");
+
+    /* **启动时就把通知渠道建好。**
+
+       以前只在"登录 / 恢复会话"的路径上调 refreshNotifyPermission()。
+       已经登录的人装完新版本直接进主界面，那次调用会走到，
+       但如果中途出任何岔子（比如权限已经是 granted，就不申请了），
+       渠道可能一直没建——**没渠道就没有弹窗横幅**，
+       表现是"通知进了下拉栏但不弹"。
+
+       这里无条件调一次：建渠道是幂等的，
+       权限已给的话也不会再弹框烦人。 */
+    if (typeof ensureNotifyChannel === "function") {
+      ensureNotifyChannel();
+    }
+    if (typeof refreshNotifyPermission === "function") {
+      refreshNotifyPermission().then(() => renderMe());
+    }
+  } else {
+    showPage("login");
+  }
+}
+
+/* 切换主题：**界面和图表一起变**。
+
+   之前只调了 setChartTheme()，那只改了 Canvas 的颜色，
+   界面的 CSS 变量没动——所以看起来像「切了没反应」。
+   现在两件事一起做：
+     · applyThemeVariables() 把配色写成 CSS 变量给界面用
+     · setChartTheme() 让图表下次重画时取新色
+   两处的值来自同一个 THEME_COLORS，不会不同步。 */
+function applyTheme(name) {
+  const theme = name === "dark" ? "dark" : "light";
+  setChartTheme(theme);
+  applyThemeVariables(theme);
+  saveSetting("theme", theme);
+  return theme;
+}
+
+/* ---------------------------------------------------------- 小工具 */
+function $(id) { return document.getElementById(id); }
+
+function escapeHtml(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function toast(text) {
+  const box = $("toast");
+  box.textContent = text;
+  box.classList.remove("hidden");
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => box.classList.add("hidden"), 2800);
+}
+
+function setBanner(element, text, kind) {
+  element.innerHTML = text
+    ? `<div class="banner ${kind || "info"}">${escapeHtml(text)}</div>` : "";
+}
+
+/* 底部导航要占位置，所以这些页面的 body 要留出底部空间。
+   登录页和派任务页没有导航，不用留。 */
+function makeNavScrollable() {
+  ["page-dash", "page-team", "page-assist",
+   "page-tasks", "page-me"].forEach(id => {
+    $(id).classList.add("has-nav");
+  });
+}
+
+/*: 所有页面。加新页面必须登记在这里——
+     漏了的话页面永远显示不出来，而且不报错，很难查。 */
+const PAGES = ["login", "dash", "project", "tasks", "team", "assist",
+               "assign", "staff", "me"];
+
+function showPage(name) {
+  const target = PAGES.indexOf(name) === -1 ? "dash" : name;
+  PAGES.forEach(key => {
+    $("page-" + key).classList.toggle("hidden", key !== target);
+  });
+  document.querySelectorAll("#nav button").forEach(button => {
+    button.classList.toggle("on", button.dataset.page === target);
+  });
+
+  /* 登录页不显示底部导航——还没登录，那些页面一个都进不去。
+     显示出来只会让人以为能点。（样式见 style.css 的 .no-nav） */
+  document.body.classList.toggle("no-nav", target === "login");
+
+  /* 每个页面自己负责渲染。这里是唯一的入口，
+     所以不会出现"某个页面没刷新"的问题。 */
+  if (target === "dash") renderDash();
+  if (target === "team") renderTeam();
+  if (target === "assist") renderAssist();
+  if (target === "tasks") renderTasks();
+  if (target === "assign") renderAssign();
+  if (target === "staff") renderStaff();
+  if (target === "me") renderMe();
+  if (target === "login") renderLogin();
+  refreshSyncBadge();
+
+  /* **进「我的」页就算看过了，红点当场清掉。**
+
+     原来只有点右上角铃铛、打开通知中心才会清除未读。
+     但用户的直觉是"我点进「我的」了，红点该没了"——
+     他点了没消，就觉得"红点消不掉"。
+
+     用户说的对：**红点是"那儿有新东西"的提示，进去了就该消失。**
+     （通知本身不会被删，只是标记为已读；通知中心里还能翻。） */
+  if (target === "me" && typeof markNotificationsRead === "function") {
+    markNotificationsRead();
+  }
+
+  /* 通知：切页时刷新红点和提示条。
+     两处都调，因为这个函数只在切页时跑，
+     而且"切到看板/任务页就该看到最新提示"正是想要的行为。 */
+  renderNotifyBadges();
+  renderNotifyBanner("notify-banner-dash");
+  renderNotifyBanner("notify-banner-tasks");
+
+  window.scrollTo(0, 0);
+}
+
+/* 「我的」页。**老板和员工共用**——两边的退出登录都在这里。
+
+   老板多显示几个区块（云服务设置、切主题、管员工），
+   员工只关心"我报上去没有"。用 me-boss-extras 控制显示。 */
+function renderMe() {
+  const profile = DB.profile;
+  const isBoss = !!(profile && profile.role === "boss");
+
+  $("me-sub").textContent = profile ? profile.name : "没有登录";
+  $("me-name").textContent = profile ? profile.name : "—";
+  $("me-code").textContent = profile ? profile.code : "—";
+  /* 老板那边填的是手机号，员工那边是工号——标签跟着变 */
+  $("me-code-label").textContent = isBoss ? "手机号" : "工号";
+  $("me-role").textContent = !profile ? "未登录"
+    : isBoss ? "老板" : "员工";
+
+  const status = syncStatus();
+  $("me-sync").textContent = !status.configured ? "单机模式"
+    : !status.signedIn ? "未登录"
+    : status.last && status.last.at
+      ? (status.last.ok ? "已同步 " + String(status.last.at).slice(11, 16)
+                        : "同步失败")
+      : "还没同步过";
+  /* 同步失败时把原因摆出来，不要让人只看到一个"失败" */
+  const syncNode = $("me-sync");
+  syncNode.title = (status.last && status.last.message) || "";
+  if (status.last && status.last.ok === false) {
+    syncNode.style.color = "var(--watch)";
+  } else {
+    syncNode.style.color = "";
+  }
+  $("me-pending").textContent = status.pending + " 条";
+
+  $("me-boss-extras").classList.toggle("hidden", !isBoss);
+
+  /* 通知相关的提示。
+     两种情况要说清楚，不然用户只会觉得"怎么没通知"：
+       1. 服务端的 task_events 表还没建（SQL 没跑）
+       2. 系统通知开关开着，但权限没给 */
+  const hintBox = $("me-notify-hint");
+  const hints = [];
+
+  /* **实时推送的状态要看得见。**
+
+     这一条是排查"通知不弹"时加的：实时订阅失败是**静默**的——
+     订阅回调会说 SUBSCRIBED，但如果连接没带认证令牌、
+     或者服务端没开实时发布，事件会被**悄悄过滤掉**，
+     客户端一个错都不报。用户只觉得"还是慢"，无从查起。
+
+     所以把状态摆出来。正常时它写着"订阅：SUBSCRIBED"，
+     不正常时一眼能看到卡在哪一步（令牌？订阅？）。
+
+     只在系统通知开着时才显示——关掉通知的人不关心这个。 */
+  const notifyPrefsForHint = notifyPrefs();
+  if (notifyPrefsForHint.enabled && notifyPrefsForHint.system
+      && typeof realtimeState !== "undefined" && realtimeState) {
+    const good = String(realtimeState).indexOf("SUBSCRIBED") !== -1
+      || String(realtimeState).indexOf("收到推送") !== -1;
+    hints.push((good ? "实时推送：" : "实时推送异常：")
+      + "<code>" + escapeHtml(realtimeState) + "</code>");
+  }
+  if (DB.notifyTableMissing) {
+    /* **文件名要和实际存在的对上。**
+
+       这里原来指向 sql/migrate-notify.sql，但我后来把那个文件
+       和"工号解封"合并成了 sql/migrate-notify.sql——
+       提示就指错了，用户按它去找会找不到。
+
+       改动 SQL 文件名时，**记得全局搜一遍引用**。 */
+    hints.push("通知功能没装好——去电脑上的 Supabase SQL Editor "
+      + "跑一遍 <code>sql/migrate-notify.sql</code>");
+  }
+  const prefs = notifyPrefs();
+  if (prefs.enabled && prefs.system) {
+    const permission = DB.notifyPermission;
+    if (permission && permission.supported && !permission.granted) {
+      hints.push("系统通知没打开：在手机设置里允许本 App 发通知，"
+        + "否则 App 退到后台时收不到提醒");
+    }
+  }
+  if (status.pending > 0) {
+    hints.push("还有 " + status.pending + " 条没上传成功，"
+      + "点「立即同步」重试");
+  }
+  hintBox.innerHTML = hints.length
+    ? '<div class="banner warn">' + hints.join("<br>") + "</div>"
+    : "";
+}
+
+/* ============================================================
+   弹层表单
+   ============================================================ */
+let sheetSubmit = null;
+
+function openSheet(title, bodyHtml, buttons) {
+  $("sheet-title").textContent = title;
+  $("sheet-body").innerHTML = bodyHtml;
+  const foot = $("sheet-foot");
+  foot.innerHTML = "";
+  (buttons || []).forEach(spec => {
+    const button = document.createElement("button");
+    button.className = "btn " + (spec.kind || "ghost");
+    button.textContent = spec.label;
+    button.onclick = () => spec.onClick();
+    foot.appendChild(button);
+  });
+  $("sheet").classList.remove("hidden");
+}
+
+function closeSheet() {
+  $("sheet").classList.add("hidden");
+  sheetSubmit = null;
+}
+
+function bindGlobalEvents() {
+  $("sheet").addEventListener("click", event => {
+    if (event.target.dataset.close) closeSheet();
+  });
+
+  document.querySelectorAll("#nav button").forEach(button => {
+    button.onclick = () => showPage(button.dataset.page);
+  });
+
+  /* **按下任何按钮都轻震一下。**
+
+     视觉上的缩放进 CSS（.btn:active 等），触感在这里——
+     两者加起来才叫"跟手"：眼看按钮陷下去 + 手感到一下轻震。
+
+     用 pointerdown 而不是 click，因为触感要**在手指按下时**发生，
+     等 click 就已经晚了（click 要等抬手）。
+
+     只在支持震动的设备上做（Android 支持，桌面浏览器没有就跳过）。
+     15 毫秒很短，不会有"嗡嗡"的噪音感。 */
+  bindPressFeedback();
+
+  /* ---- 登录页 ----
+     身份切换按钮的绑定**在 renderLogin() 里做**，不在这里。
+     原因：绑定写在这里的话只有启动时执行一次，
+     以后任何重新渲染登录页的路径都会让按钮变成死按钮
+     （点了没反应而且不报错）。放在渲染函数里才是"画出来就能点"。 */
+  $("btn-login").onclick = doLogin;
+  $("login-password").addEventListener("keydown", event => {
+    if (event.key === "Enter") doLogin();
+  });
+  /* 老板自助注册。**只有第一个能成功**，之后服务端会拒绝。
+     员工不走这个入口——他们的账号由老板建。 */
+  $("btn-register-boss").onclick = openBossRegister;
+  /* 忘了密码的出口。
+     **忘了绑这个按钮**——加按钮的时候只改了 HTML 和 account.js，
+     忘了在这里接线，表现是"点了没反应"。
+     （浏览器测试里的"「忘了密码」有 onclick"抓到了它。） */
+  $("btn-forgot").onclick = openForgotPassword;
+  /* 注意：登录页上的「云服务设置」和「先不登录，只用本机功能」
+     两个按钮**已经删掉了**（用户要求去掉）。
+
+     云服务地址有预置值，手机上根本不用填；真要改，
+     「我的 → 云服务设置」还在（登录后）。
+     本机模式也保留：不登录照样能用，只是不用摆个按钮强调。 */
+  $("btn-resume").onclick = () => {
+    resumeSession();
+    showPage(DB.profile && DB.profile.role === "employee" ? "tasks" : "dash");
+  };
+  $("btn-switch-account").onclick = () => {
+    cloudLogout().then(() => { renderLogin(); toast("请输入新账号"); });
+  };
+
+  /* ---- 员工任务页 ---- */
+  $("btn-task-menu").onclick = openStaffMenu;
+
+  /* ---- 通知 ---- */
+  /* 看板右上和任务页右上各有一个铃铛，加上底部导航的「我的」红点，
+     三个入口都通向同一个通知中心。 */
+  $("btn-notify").onclick = () => openNotifyCenter();
+  $("btn-task-notify").onclick = () => openNotifyCenter();
+
+  /* ---- 「我的」页（两种身份都用） ---- */
+  $("btn-sync-now").onclick = () => {
+    syncNow("manual").then(status => {
+      renderMe();
+      renderNotifyBadges();
+      toast(status && status.last && status.last.message
+        ? status.last.message
+        : (status.pending ? `还有 ${status.pending} 条待上传` : "已同步"));
+    });
+  };
+  $("btn-me-logout").onclick = logout;
+  /* 账号管理。两种身份都要用，所以放在 me-boss-extras 外面。 */
+  $("btn-me-password").onclick = openChangePassword;
+  $("btn-me-login").onclick = openChangeLogin;
+  $("btn-me-delete").onclick = openDeleteAccount;
+
+  /* 老板专有的两项。员工那边这块是隐藏的，
+     绑定照做——隐藏的按钮点了也没事，
+     而"按身份决定要不要绑定"反而容易漏掉一处。 */
+  $("btn-me-theme").onclick = () => {
+    const next = chartTheme === "dark" ? "light" : "dark";
+    applyTheme(next);
+    showPage("me");
+    toast("已切到" + (next === "dark" ? "深色" : "浅色"));
+  };
+  $("btn-me-accounts").onclick = () => showPage("staff");
+
+  /* **「云服务设置」的隐藏入口：长按资料卡片。**
+
+     服务器是预置的，界面上不该摆这个按钮（别人看不懂"云服务"）。
+     但万一预置的失效、或者要换项目，必须还有路可走，
+     所以留一个**只有知道的人才会用**的手势。
+
+     也接受双击——手机上长按有时会被系统的文本选择干扰。 */
+  const meCard = $("me-card");
+  if (meCard) {
+    let pressTimer = null;
+    const openIt = () => {
+      openCloudSettings();
+    };
+    meCard.addEventListener("pointerdown", () => {
+      pressTimer = setTimeout(openIt, 900);
+    });
+    ["pointerup", "pointercancel", "pointerleave"].forEach(type => {
+      meCard.addEventListener(type, () => {
+        if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+      });
+    });
+    meCard.addEventListener("dblclick", openIt);
+  }
+
+  /* ---- 老板：员工账号 ---- */
+  $("btn-new-staff").onclick = () => editNewStaff();
+  /* 这个按钮现在是"重试创建"——建号在新建时一次就完成了，
+     只有当时没网才会留下待建的账号。 */
+  $("btn-sync-staff").onclick = () => retryStaffFromUI();
+
+  /* ---- 团队页的两个管理入口 ----
+     **之前漏了**：page-staff 和 page-assign 两个页面写好了，
+     但没有任何地方能跳过去，老板根本找不到建号功能。
+     页面和入口要一起加，否则等于没做。 */
+  $("btn-goto-staff").onclick = () => showPage("staff");
+  $("btn-goto-assign").onclick = () => { showPage("assign"); renderAssign(); };
+
+  /* ---- 老板：派任务 ---- */
+  $("btn-assign-submit").onclick = submitAssign;
+  $("assign-date").onchange = renderAssign;
+
+  /* 看板 */
+  $("btn-new-project").onclick = () => editProject(null);
+  $("btn-new-habit").onclick = () => editHabit(null);
+  $("btn-menu").onclick = openMenu;
+
+  /* 项目详情 */
+  document.querySelectorAll("[data-back]").forEach(button => {
+    button.onclick = () => showPage(button.dataset.back);
+  });
+  $("btn-edit-project").onclick = () => {
+    if (currentProjectId) editProject(currentProjectId);
+  };
+
+  /* 团队 */
+  $("btn-new-employee").onclick = () => editEmployee(null);
+  $("btn-new-worklog").onclick = () => editWorklog(null);
+
+  /* 小助手 */
+  $("btn-ask").onclick = () => sendAsk($("ask").value);
+  $("ask").addEventListener("keydown", event => {
+    if (event.key === "Enter") { sendAsk($("ask").value); }
+  });
+  $("btn-clear-chat").onclick = () => {
+    chat = [];
+    saveSetting("chat", chat);
+    renderAssist();
+    toast("对话已清空");
+  };
+}
+
+/* ---------------------------------------------------------- 菜单 */
+function openMenu() {
+  const status = syncStatus();
+  /* 云服务状态一行说清楚，否则用户不知道自己配没配 */
+  const cloudLine = !status.configured
+    ? '<span style="color:var(--watch)">还没配云服务，登录和自动同步用不了</span>'
+    : !status.signedIn
+      ? '<span style="color:var(--watch)">已配好，但还没登录</span>'
+      : '<span style="color:var(--ok)">已连接 · '
+        + escapeHtml(DB.profile.name) + '（'
+        + (DB.profile.role === "boss" ? "老板" : "员工") + '）</span>';
+
+  /* **「云服务设置」不摆在界面上。**
+
+     服务器（地址 + 密钥）是预置的，正常用一辈子都不用碰。
+     摆一个"云服务设置"按钮出来，别人只会问"云服务是什么"。
+
+     但如果真需要改（换了 Supabase 项目、或者预置的失效了），
+     必须还有路可走——所以：
+       · 状态行本身就是入口（下面挂 id，长按进设置）
+       · 没配好时**直接展开那个按钮**，因为那时候你必须能进 */
+  openSheet("更多", `
+    <div class="meta" style="padding:2px 0 12px" id="m-cloud-line">
+      云服务：${cloudLine}</div>
+    ${status.configured
+      ? ""
+      : '<button class="btn ghost" id="m-cloud" style="width:100%">'
+        + '配置云服务</button><div style="height:10px"></div>'}
+    <button class="btn ghost" id="m-account" style="width:100%">
+      ${status.signedIn ? "账号与同步状态" : "去登录"}</button>
+    <div style="height:10px"></div>
+    <button class="btn ghost" id="m-export-db" style="width:100%">
+      导出数据库（备份 / 交给电脑）</button>
+    <div style="height:10px"></div>
+    <button class="btn ghost" id="m-import-db" style="width:100%">导入数据库</button>
+    <div style="height:10px"></div>
+    <button class="btn ghost" id="m-import-worklog" style="width:100%">
+      导入电脑导出的快照</button>
+    <div style="height:10px"></div>
+    <button class="btn ghost" id="m-theme" style="width:100%">
+      切换主题（当前：${escapeHtml(chartTheme === "dark" ? "深色" : "浅色")}）</button>
+  `, [{ label: "关闭", onClick: closeSheet }]);
+
+  if ($("m-cloud")) {
+    $("m-cloud").onclick = () => { closeSheet(); openCloudSettings(); };
+  }
+  $("m-account").onclick = () => {
+    closeSheet();
+    /* 已经登录就去看同步状态，没登录就回登录页 */
+    showPage(syncStatus().signedIn ? "me" : "login");
+  };
+  $("m-export-db").onclick = exportDatabase;
+  $("m-import-db").onclick = () => pickFile(importDatabase);
+  $("m-import-worklog").onclick = () => pickFile(importSnapshot);
+  $("m-theme").onclick = () => {
+    const next = chartTheme === "dark" ? "light" : "dark";
+    applyTheme(next);
+    closeSheet();
+    /* 重画当前页面：图表颜色是 Canvas 画的，不重画就还是旧的 */
+    showPage(currentPageName());
+    toast("已切到" + (next === "dark" ? "深色" : "浅色"));
+  };
+}
+
+function currentPageName() {
+  const pages = ["dash", "project", "team", "assist"];
+  for (let i = 0; i < pages.length; i += 1) {
+    if (!$("page-" + pages[i]).classList.contains("hidden")) return pages[i];
+  }
+  return "dash";
+}
+
+/* ---------------------------------------------------------- 按下反馈 */
+
+/* 按下去轻震一下。
+
+ ## 为什么用 pointerdown 而不是绑每个按钮的 click
+
+   · click 要等**抬手**才触发，那时候手指已经离开，
+     震动的时机就不对了（感觉像"延迟了一下才震"）
+   · 用事件委托绑在 document 上，**之后动态加进来的按钮也自动生效**
+     （弹层里的按钮是每次重画的，一个个绑会漏）
+
+ ## 为什么只震 12 毫秒
+
+   长震动会让人觉得手机在"嗡"，短震动才像"嗒"一下。
+   Android 上 10~15ms 是常见的轻触反馈时长。
+
+ ## 兼容
+
+   · 不支持 vibrate 的设备（桌面浏览器）直接跳过
+   · 用户关掉系统的"触摸震动"时，vibrate 会被系统忽略，不用自己判断 */
+function bindPressFeedback() {
+  if (typeof navigator === "undefined"
+      || typeof navigator.vibrate !== "function") {
+    return;
+  }
+
+  /* 防抖：手指按住不放会连续触发 pointerdown，
+     连震一串反而变成噪音。300 毫秒内只震一次。 */
+  let lastBuzz = 0;
+
+  document.addEventListener("pointerdown", event => {
+    const target = event.target;
+    if (!target || typeof target.closest !== "function") return;
+    const hit = target.closest(".btn, .chip, .icon-btn, nav button");
+    if (!hit) return;
+    /* 禁用的按钮不该给反馈——它本来就点不动 */
+    if (hit.disabled) return;
+
+    const now = Date.now();
+    if (now - lastBuzz < 300) return;
+    lastBuzz = now;
+    try {
+      navigator.vibrate(12);
+    } catch (error) {
+      /* 震动失败不影响任何功能，静默跳过 */
+    }
+  }, { passive: true });
+}
+
+/* ---------------------------------------------------------- 角色形象 */
+/* 头像放在 icons/ 目录，由 prepare-avatars.py 生成。
+   两套尺寸各有用处：
+     · 脸特写（192px）  小尺寸用，聊天气泡、空状态
+     · 整身立绘（320px）大尺寸用，首屏和空状态的"主形象"，
+                        边缘由 CSS 羽化，所以是整张图不是裁圆的
+   全部预加载：9 张总共约 300 KB，一次读进内存，
+   之后切换表情不会出现"闪一下才出来"。 */
+const AVATARS = {
+  neutral: "01_嗯",        // 默认
+  happy:   "02_好耶",      // 一切正常、操作成功
+  sleepy:  "03_睡觉",      // 没有数据
+  puzzled: "04_疑惑",      // 听不懂
+  warn:    "05_哼",        // 有风险、超预算
+  alarm:   "06_惊讶",      // 严重风险、超期
+  warm:    "07_抱抱",      // 鼓励、建议
+  ok:      "08_嗯嗯",      // 确认、认可
+  watch:   "09_暗中观察",  // 等待输入
+};
+
+function faceSrc(key) {
+  return "icons/" + (AVATARS[key] || AVATARS.neutral) + ".webp";
+}
+
+function heroSrc(key) {
+  return "icons/" + (AVATARS[key] || AVATARS.neutral) + "@hero.webp";
+}
+
+/* 根据当前数据挑一个表情。**表情是有信息量的**，不是装饰：
+   有严重问题就"惊讶"，一切正常就"好耶"，没数据就"睡觉"。 */
+function dashboardMood(rows, bad) {
+  if (!rows.length) return "sleepy";
+  if (bad.some(item => item.result.level === "严重")) return "alarm";
+  if (bad.length) return "warn";
+  return "happy";
+}
+
+/* 头像旁边那句话。写的是**判断**，不是客套——
+   第一眼就该知道今天要不要操心。 */
+function heroLine(mood, rows, bad, weekHours, range) {
+  if (mood === "sleepy") {
+    return "还没有项目。点下面「+ 新建」记一个，之后我会盯着进度和工时。";
+  }
+  if (mood === "alarm") {
+    const worst = bad.find(item => item.result.level === "严重");
+    return `《${worst.project.name}》情况比较紧，建议今天就看一眼。`;
+  }
+  if (mood === "warn") {
+    const names = bad.map(item => `《${item.project.name}》`).join("、");
+    return `${names} 需要处理，其余正常。`;
+  }
+  if (weekHours <= 0) {
+    return `${rows.length} 个项目都在正常范围内。不过这 ${range.days} 天还没人报工时。`;
+  }
+  return `${rows.length} 个项目都在正常范围内，${range.days} 天里投了 ${weekHours.toFixed(0)} 小时。`;
+}
+
+/* 按日期聚合每日工时，返回 {labels, data}。
+   窗口是最近 N 天（含今天），**每一天都要有位置**——
+   没记工时的日子是 0，不能跳过，否则折线会把空档连起来，
+   看起来像"一直在干活"。
+
+   **用 fetchWorklogs() 而不是 DB.worklogs**：
+   老板自己记的在 DB.worklogs，员工通过云端报上来的在
+   DB.remoteWorklogs。只读前者的话，员工报的工时会从趋势图上消失。 */
+function dailyHours(days) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const labels = [];
+  const data = [];
+  const sums = {};
+
+  fetchWorklogs().forEach(log => {
+    const key = log.work_date || "";
+    sums[key] = (sums[key] || 0) + num(log.hours);
+  });
+
+  for (let i = days - 1; i >= 0; i -= 1) {
+    const date = new Date(today.getTime() - i * 86400000);
+    const key = dateToISO(date);
+    labels.push(key.slice(5));          // "01-05"
+    data.push(Math.round((sums[key] || 0) * 10) / 10);
+  }
+  return { labels, data };
+}
+
+/* ---------------------------------------------------------- 习惯打卡 */
+/* 首屏顶部那一排圆圈。
+
+   交互设计：**点一下直接打卡，不弹任何窗口**。
+   习惯打卡最大的敌人是"打卡本身太麻烦"——
+   每点一次都弹表单，三天就不想用了。
+   所以只有"计量型要填数值"和"长按填备注"才弹层。 */
+
+function renderHabits() {
+  const rows = todayHabitRows();
+  const row = $("habit-row");
+  const title = $("habit-title");
+
+  if (!rows.length) {
+    title.textContent = "今日打卡";
+    row.innerHTML = DB.habits.length
+      ? '<div class="meta" style="padding:4px 0">今天没有要做的习惯。</div>'
+      : '<div class="meta" style="padding:4px 0">'
+        + "还没有习惯。点右边「+ 习惯」加一个，比如「每周五复盘」。</div>";
+    return;
+  }
+
+  const doneCount = rows.filter(item => item.done).length;
+  const today = todayISO();
+  title.textContent = `今日打卡 ${doneCount}/${rows.length}`
+    + `　周${WEEKDAY_NAMES[weekdayOf(today) - 1]}`;
+
+  row.innerHTML = rows.map(item => {
+    const habit = item.habit;
+    const quantity = habit.kind === "quantity";
+    /* 计量型的圆圈里用 conic-gradient 画进度环，
+       比例通过 CSS 变量 --p 传进去 */
+    let ring = "";
+    if (quantity) {
+      const ratio = num(habit.target) > 0
+        ? Math.min(1, num(item.value) / num(habit.target)) : 0;
+      ring = ` style="--p:${Math.round(ratio * 100)}%"`;
+    }
+    const streak = item.streak > 1
+      ? `<span class="habit-streak">${item.streak}</span>` : "";
+    const valueText = quantity
+      ? (item.done ? `${num(item.value)}` : "")
+      : (item.done ? "✓" : "");
+    return `
+      <button class="habit ${item.done ? "done" : ""} ${quantity ? "qty" : ""}"
+              data-habit="${habit.id}"${ring}>
+        <span class="habit-dot">${escapeHtml(valueText)}</span>
+        <span class="habit-name">${escapeHtml(habit.name)}</span>
+        ${streak}
+      </button>`;
+  }).join("");
+
+  row.querySelectorAll("[data-habit]").forEach(node => {
+    const habitId = Number(node.dataset.habit);
+    const habit = habitById(habitId);
+    if (!habit) return;
+
+    /* 长按 550ms 打开详情（改数值、写备注）。
+       同时监听 touch 和 mouse：手机上走 touch，桌面浏览器调试走 mouse。
+       用一个标志位区分"长按"和"单击"——长按后手指抬起时
+       还会触发 click，不拦住就会立刻把刚打的卡又取消掉。 */
+    let longPressed = false;
+    let pressTimer = null;
+    let startX = 0;
+    let startY = 0;
+
+    const startPress = event => {
+      longPressed = false;
+      /* 只有触摸才记录起点。鼠标的 mousemove 即使不按键也在触发，
+         拿它做滑动检测会把正常的长按判成滑动——桌面上就没法长按了。 */
+      if (event.touches) {
+        startX = event.touches[0].clientX;
+        startY = event.touches[0].clientY;
+      }
+      pressTimer = setTimeout(() => {
+        longPressed = true;
+        openHabitCheckin(habit);
+      }, 550);
+    };
+    const cancelPress = () => {
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    };
+    /* 滑动就取消长按。
+
+       **这是个真问题，不是优化**：没有这段的话，
+       手指按在圆圈上往左滑去翻看后面的习惯，滑到 550ms
+       定时器照样触发，弹层就跳出来了——用户根本没想打开详情。
+
+       横向位移超过 8px 就算滑动。阈值不能太小，否则手指
+       轻微抖动也会把正常点按判成滑动。 */
+    const maybeScrolled = event => {
+      if (!pressTimer || !event.touches) return;
+      const point = event.touches[0];
+      if (Math.abs(point.clientX - startX) > 8
+          || Math.abs(point.clientY - startY) > 8) {
+        cancelPress();
+        /* 标记一下：手指抬起时还会触发 click，
+           不拦住就会顺手把卡打上或取消 */
+        longPressed = true;
+      }
+    };
+
+    node.addEventListener("touchstart", startPress, { passive: true });
+    node.addEventListener("touchmove", maybeScrolled, { passive: true });
+    node.addEventListener("touchend", cancelPress);
+    node.addEventListener("touchcancel", cancelPress);
+    node.addEventListener("mousedown", startPress);
+    node.addEventListener("mouseup", cancelPress);
+    node.addEventListener("mouseleave", cancelPress);
+
+    node.onclick = () => {
+      cancelPress();
+      if (longPressed) { longPressed = false; return; }
+      /* 计量型第一次点要先问数值——不知道记了多少就没法打卡 */
+      if (habit.kind === "quantity" && !habitLogOn(habit.id, todayISO())) {
+        openHabitCheckin(habit);
+        return;
+      }
+      try {
+        const nowDone = toggleHabit(habit.id);
+        /* 触感反馈。打卡这种高频操作，震动是最直接的"确认感"。
+           桌面浏览器没有这个 API，所以先判断存在。 */
+        if (navigator.vibrate) navigator.vibrate(nowDone ? 14 : 8);
+        toast(nowDone ? `已打卡：${habit.name}` : `已取消：${habit.name}`);
+
+        /* **顺序很重要**：先重画，再从新画出来的 DOM 上找那个圆圈做动画。
+           反过来做的话，renderHabits() 会把刚加动画的元素销毁，
+           动画一帧都播不出来。 */
+        renderHabits();
+        renderDash();
+        const fresh = $("habit-row").querySelector(`[data-habit="${habit.id}"]`);
+        if (fresh) animateHabit(fresh, nowDone);
+      } catch (error) {
+        toast(error.message);
+      }
+    };
+  });
+}
+
+/* 打卡时给那个圆圈一个弹性反馈。
+
+   做法：加 .pop 类触发 keyframes，动画结束再移除。
+   这里**不重画整个列表**——重画会让所有圆圈一起闪，
+   看起来像"整页刷新"而不是"我点的那一个响应了"。 */
+function animateHabit(node, done) {
+  const dot = node.querySelector(".habit-dot");
+  if (!dot) return;
+  dot.classList.remove("pop");
+  /* 强制回流，否则连续点同一个圆圈时动画不会重新触发
+     （浏览器会把两次 class 变化合并成一次，看起来像没反应） */
+  void dot.offsetWidth;
+  dot.classList.add("pop");
+  setTimeout(() => dot.classList.remove("pop"), 340);
+  if (done) {
+    node.classList.add("just-done");
+    setTimeout(() => node.classList.remove("just-done"), 620);
+  }
+}
+
+/* 计量型打卡 / 长按改备注，都用这一个弹层 */
+function openHabitCheckin(habit) {
+  const log = habitLogOn(habit.id, todayISO());
+  const quantity = habit.kind === "quantity";
+  const done = habitDone(log, habit);
+
+  openSheet(habit.name, `
+    ${quantity ? `
+      <label for="h-value">今天做了多少（目标 ${num(habit.target)}${escapeHtml(habit.unit)}）</label>
+      <input id="h-value" type="number" step="any" inputmode="decimal"
+             value="${log ? num(log.value) : num(habit.target)}">`
+      : `<div class="meta">${done ? "今天已经打卡。" : "今天还没打卡。"}</div>`}
+    <label for="h-note">备注（可选）</label>
+    <input id="h-note" value="${escapeHtml(log ? log.note : "")}">
+    <label>坚持情况</label>
+    <div class="meta">连续 ${habitStreak(habit.id)} 天　·　
+      近 30 天完成率 ${Math.round(habitRate(habit.id, 30).rate * 100)}%</div>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    ...(log ? [{ label: "取消打卡", kind: "danger", onClick: () => {
+      uncheckHabit(habit.id);
+      closeSheet(); renderHabits(); renderDash(); toast("已取消");
+    } }] : []),
+    { label: "编辑", onClick: () => { closeSheet(); editHabit(habit.id); } },
+    { label: "打卡", kind: "", onClick: () => {
+      try {
+        const value = quantity ? $("h-value").value : 1;
+        checkHabit(habit.id, value, $("h-note").value);
+        closeSheet(); renderHabits(); renderDash();
+        toast("已打卡：" + habit.name);
+      } catch (error) { toast(error.message); }
+    } },
+  ]);
+}
+
+/* 习惯的新增 / 编辑表单 */
+function editHabit(id) {
+  const habit = id ? habitById(id) : null;
+  if (id && !habit) { toast("这条习惯已经不存在了"); return; }
+  const isNew = !habit;
+  const draft = habit || { kind: "daily", target: 1, weekdays: "" };
+  const picked = String(draft.weekdays || "").split(/[\s,]+/);
+
+  /* 周期用快捷按钮，不用输入框——
+     手机上打 "1 3 5" 这种事没人愿意干 */
+  const weekdayChips = [1, 2, 3, 4, 5, 6, 7].map(day =>
+    `<button class="chip wd${picked.indexOf(String(day)) !== -1 ? " on" : ""}"`
+    + ` data-day="${day}">周${WEEKDAY_NAMES[day - 1]}</button>`).join("");
+
+  openSheet(isNew ? "新增习惯" : "编辑习惯", `
+    <label for="hb-name">习惯名称 *</label>
+    <input id="hb-name" value="${escapeHtml(draft.name || "")}">
+
+    <label for="hb-kind">类型</label>
+    <select id="hb-kind">
+      <option value="daily"${draft.kind !== "quantity" ? " selected" : ""}>
+        打勾型 —— 今天做没做</option>
+      <option value="quantity"${draft.kind === "quantity" ? " selected" : ""}>
+        计量型 —— 要达到某个数</option>
+    </select>
+
+    <div id="hb-quantity" class="${draft.kind === "quantity" ? "" : "hidden"}">
+      <div class="row2">
+        <div><label for="hb-target">目标值</label>
+          <input id="hb-target" type="number" step="any" inputmode="decimal"
+                 value="${num(draft.target) || ""}"></div>
+        <div><label for="hb-unit">单位</label>
+          <input id="hb-unit" value="${escapeHtml(draft.unit || "")}"></div>
+      </div>
+    </div>
+
+    <label>什么时候做（都不选 = 每天）</label>
+    <div class="chips" id="hb-weekdays">${weekdayChips}</div>
+
+    <label for="hb-note">备注</label>
+    <input id="hb-note" value="${escapeHtml(draft.note || "")}">
+  `, [
+    { label: "取消", onClick: closeSheet },
+    ...(isNew ? [] : [{ label: "删除", kind: "danger", onClick: () => {
+      if (!confirm(`确定删除「${habit.name}」？\n\n打卡记录会一起删掉。`)) return;
+      deleteHabit(habit.id);
+      closeSheet(); renderHabits(); renderDash(); toast("已删除");
+    } }]),
+    { label: "保存", kind: "", onClick: () => saveHabitForm(id) },
+  ]);
+
+  $("hb-kind").onchange = () => {
+    $("hb-quantity").classList.toggle("hidden",
+      $("hb-kind").value !== "quantity");
+  };
+  document.querySelectorAll("#hb-weekdays .wd").forEach(button => {
+    button.onclick = () => button.classList.toggle("on");
+  });
+}
+
+function saveHabitForm(id) {
+  const picked = [];
+  document.querySelectorAll("#hb-weekdays .wd").forEach(button => {
+    if (button.classList.contains("on")) picked.push(button.dataset.day);
+  });
+  const kind = $("hb-kind").value;
+  const targetInput = $("hb-target");
+  const data = {
+    name: $("hb-name").value,
+    kind: kind,
+    target: kind === "quantity" && targetInput ? targetInput.value : 0,
+    unit: $("hb-unit") ? $("hb-unit").value : "",
+    weekdays: picked.join(" "),
+    note: $("hb-note").value,
+  };
+  try {
+    if (id) updateHabit(id, data); else addHabit(data);
+    closeSheet(); renderHabits(); renderDash();
+    toast(id ? "已保存" : "已创建");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+/* ---------------------------------------------------------- 看板 */
+function renderDash() {
+  const rows = projectSummary();
+  const bad = rows.filter(item => item.result.level === "风险"
+                               || item.result.level === "严重");
+  const people = activeEmployees();
+  /* 变量名不叫 window——那会遮蔽全局的 window 对象，
+     以后在这个函数里用 window.scrollTo 就会报错。 */
+  const { rows: loads, window: range } = loadRows();
+  const weekHours = loads.reduce((sum, row) => sum + row.hours, 0);
+
+  $("dash-sub").textContent = DB.projects.length
+    ? `${DB.projects.length} 个项目 · ${people.length} 人在岗`
+    : "还没有项目";
+
+  /* 一行摘要，取代原来的四张指标卡。
+     卡片要占屏幕三分之一，而里面的数字和下面的列表是同一份信息——
+     首屏该留给真正要看的东西。 */
+  const parts = [`<b>${DB.projects.length}</b> 个项目`];
+  if (bad.length) {
+    parts.push(`<b class="hot">${bad.length}</b> 个需要处理`);
+  } else if (DB.projects.length) {
+    parts.push("没有需要处理的");
+  }
+  if (weekHours > 0) {
+    parts.push(`近 ${range.days} 天 <b>${weekHours.toFixed(0)}</b> 小时`);
+  }
+  $("dash-stats").innerHTML = parts.join('<i>·</i>');
+
+  /* 角色形象：挑表情 + 配一句话。
+     这句话是**对当前状态的判断**，不是欢迎语——
+     看一眼就知道今天要不要操心。 */
+  const mood = dashboardMood(rows, bad);
+  $("dash-hero-art").src = heroSrc(mood);
+  $("dash-hero-line").textContent = heroLine(mood, rows, bad, weekHours, range);
+
+  /* 近两周工时折线。**画的是"每天多少小时"而不是累计**——
+     累计曲线永远是往上的，看不出节奏；
+     每日曲线能看出"周末还在干""连着几天没记"这类情况。 */
+  const trend = dailyHours(14);
+  const trendTotal = trend.data.reduce((sum, value) => sum + value, 0);
+  $("dash-trend-range").textContent = trendTotal > 0
+    ? `近 14 天合计 ${trendTotal.toFixed(1)} 小时` : "";
+  drawTrend($("trend-chart"), trend.labels,
+    [{ name: "小时", data: trend.data }],
+    { height: 150, empty: "还没有工时记录" });
+
+  /* 习惯打卡排在最前——习惯的特点就是"容易忘"，
+     而这一排是唯一"看完就知道今天有没有漏"的地方。 */
+  renderHabits();
+
+  const problems = worklogProblems();
+  const list = $("dash-list");
+  if (!rows.length) {
+    list.innerHTML = '<div class="empty">还没有项目。<br>'
+      + '点上面「+ 新建」建一个。</div>';
+    if (problems.length) {
+      setBanner($("dash-banner"), problems[0].text, "warn");
+    }
+    return;
+  }
+
+  /* 卡片瘦身：只留「名字 + 等级 + 进度 + 负责人 + 一句话结论」。
+     步骤数、预算占用、阻塞数量都挪进详情页——
+     它们在那里已经有更完整的呈现，列表里重复显示只会让每张卡变高。
+     结果：一屏能看的项目从 3 个变成 5~6 个。 */
+  list.innerHTML = rows.map(item => {
+    const project = item.project;
+    const result = item.result;
+    const stats = result.metrics;
+    const barClass = result.level === "健康" ? "ok"
+      : result.level === "风险" ? "risk"
+      : result.level === "严重" ? "severe" : "";
+    let left = "";
+    if (project.status === "已交付") left = "已交付";
+    else if (stats.leftDays !== null) {
+      left = stats.leftDays < 0 ? `超期 ${Math.abs(stats.leftDays)} 天`
+                                : `剩 ${stats.leftDays} 天`;
+    }
+    const ownerLine = [project.owner || "未指定负责人", left]
+      .filter(Boolean).join(" · ");
+    return `
+      <div class="card tap pj" data-project="${project.id}">
+        <div class="pj-top">
+          <span class="pj-name">${escapeHtml(project.name)}</span>
+          <span class="pill pill-${escapeHtml(result.level)}">${escapeHtml(result.level)}</span>
+        </div>
+        <div class="pj-line">
+          <div class="bar ${barClass}">
+            <i style="width:${Math.min(100, stats.progress)}%"></i></div>
+          <span class="pj-pct">${stats.progress}%</span>
+        </div>
+        <div class="pj-meta">${escapeHtml(ownerLine)}</div>
+        <div class="pj-note">${escapeHtml(result.headline)}</div>
+      </div>`;
+  }).join("");
+
+  document.querySelectorAll("#dash-list [data-project]").forEach(card => {
+    card.onclick = () => openProject(Number(card.dataset.project));
+  });
+
+  if (problems.length) {
+    setBanner($("dash-banner"),
+      `${problems.length} 处工时异常：${problems[0].text}`, "warn");
+  }
+}
+
+/* ============================================================
+   项目详情
+   ============================================================ */
+let currentProjectId = null;
+
+function openProject(id) {
+  currentProjectId = Number(id);
+  renderProject();
+  showPage("project");
+}
+
+function renderProject() {
+  const project = getProject(currentProjectId);
+  if (!project) {
+    toast("这个项目已经不存在了");
+    showPage("dash");
+    return;
+  }
+  const result = predict(project);
+  const stats = result.metrics;
+  const budget = budgetOf(project);
+
+  $("pj-title").textContent = project.name;
+  $("pj-sub").textContent = `${project.owner || "未指定负责人"} · `
+    + `${project.status} · 优先级 ${project.priority || "中"}`;
+
+  const reasons = result.reasons.length
+    ? result.reasons.map(reason => `<div class="r">· ${escapeHtml(reason.text)}`
+        + (reason.detail
+            ? `　<span style="color:var(--fg-dim)">（${escapeHtml(reason.detail)}）</span>`
+            : "") + "</div>").join("")
+    : '<div class="r">没有发现异常。</div>';
+  const actions = result.actions.length
+    ? '<div class="a">建议：<br>'
+      + result.actions.map(item => "· " + escapeHtml(item)).join("<br>")
+      + "</div>"
+    : "";
+
+  const steps = projectSteps(project.id);
+  const stepHtml = steps.length ? steps.map(step => `
+    <div class="list-item tap" data-step="${step.id}">
+      <div class="row">
+        <div class="grow"><span class="title">${escapeHtml(step.name)}</span>
+          <div class="meta">${escapeHtml(step.owner || "未指定")} · 截止 `
+          + `${escapeHtml(step.due_date || "—")}</div></div>
+        <span class="pill pill-${escapeHtml(step.status)}">${escapeHtml(step.status)}</span>
+      </div>
+      <div style="margin-top:7px" class="bar">
+        <i style="width:${clamp(num(step.progress), 0, 100)}%"></i></div>
+      <div class="meta" style="margin-top:2px">${num(step.progress)}%</div>
+    </div>`).join("") : '<div class="meta">还没有步骤。</div>';
+
+  const abilities = projectAssessments(project.id, "ability");
+  const resources = projectAssessments(project.id, "resource");
+  const assessHtml = (label, list) => {
+    if (!list.length) return "";
+    const score = weighted(list);
+    return `<div class="row" style="margin-top:8px">
+        <div class="grow">${escapeHtml(label)}</div>
+        <b>${score === null ? "—" : score.toFixed(2)} / 5</b></div>
+      <div class="meta">${list.map(item =>
+        `${escapeHtml(item.name)} ${item.score}`).join("　")}</div>`;
+  };
+  /* 两类都可能为空，所以先各自算好再拼，别在模板里反复调用 */
+  const assessBlock = assessHtml("技术能力", abilities)
+                    + assessHtml("有利资源", resources);
+  const assessSection = assessBlock
+    || '<div class="meta">还没有评估。点上面「+ 能力」加一条。</div>';
+
+  const names = metricNames(project.id);
+  const metricsHtml = names.length
+    ? names.map(name => {
+        const rows = projectMetrics(project.id, name);
+        const last = rows[rows.length - 1];
+        return `<div class="row" style="margin-top:6px">
+          <div class="grow">${escapeHtml(name)}</div>
+          <b>${num(last.value)}${escapeHtml(last.unit || "")}</b>
+          <span class="meta">${rows.length} 个点</span></div>`;
+      }).join("")
+    : '<div class="meta">还没有指标。</div>';
+
+  const logs = worklogsFor({ project_id: project.id, limit: 3 });
+  const logHtml = logs.length ? logs.map(log => `
+    <div class="row" style="margin-top:6px">
+      <div class="grow meta">${escapeHtml(log.work_date)} ·
+        ${escapeHtml(employeeName(log.employee_id))}</div>
+      <b>${num(log.hours).toFixed(1)}h</b></div>`).join("")
+    : '<div class="meta">还没有工时。</div>';
+
+  $("pj-body").innerHTML = `
+    <div class="card">
+      <div class="row">
+        <div class="grow meta">${escapeHtml(project.start_date || "—")} → `
+        + `${escapeHtml(project.due_date || "—")}</div>
+        <span class="pill pill-${escapeHtml(project.priority || "中")}">`
+        + `${escapeHtml(project.priority || "中")}</span>
+      </div>
+      ${project.client ? `<div class="meta">客户：${escapeHtml(project.client)}</div>` : ""}
+      <div style="margin:12px 0 6px">
+        <div class="bar"><i style="width:${clamp(stats.progress, 0, 100)}%"></i></div>
+      </div>
+      <div class="meta">进度 ${stats.progress}% · 步骤 ${stats.done}/${stats.total}
+        ${stats.blocked.length ? ` · 阻塞 ${stats.blocked.length}` : ""}
+        · 投入 ${stats.hours.toFixed(1)} 小时 · ${stats.peopleCount} 人</div>
+      <div class="btn-row">
+        <button class="btn ghost" id="pj-add-step">+ 步骤</button>
+        <button class="btn ghost" id="pj-add-metric">+ 指标</button>
+        <button class="btn ghost" id="pj-add-assess">+ 能力</button>
+      </div>
+    </div>
+
+    <div class="advice">
+      <div class="head lv-${escapeHtml(result.level)}">
+        【${escapeHtml(result.level)}】${escapeHtml(result.headline)}</div>
+      ${reasons}${actions}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>财务</h3></div>
+      ${budget.has
+        ? `<div class="row"><div class="grow">预算占用</div>
+             <b class="${budget.over ? "lv-风险" : ""}">`
+          + `${Math.round(budget.ratio * 100)}%</b></div>
+           <div class="bar" style="margin-top:8px">
+             <i style="width:${Math.min(100, budget.ratio * 100)}%"></i></div>
+           <div class="meta" style="margin-top:5px">
+             预算 ${money(budget.budget)}，已花 ${money(budget.cost)}，
+             剩余 ${money(budget.remaining)}</div>`
+        : '<div class="meta">还没设预算。点右上「编辑」补上。</div>'}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>步骤</h3>
+        <span class="meta">点一条可以改</span></div>
+      ${steps.length ? '<canvas id="step-timeline" class="chart"></canvas>' : ""}
+      ${stepHtml}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>能力与资源</h3></div>
+      ${assessSection}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>指标</h3></div>
+      ${metricsHtml}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>工时对比</h3>
+        <span class="meta">计划 / 实际</span></div>
+      <canvas id="project-bars" class="chart"></canvas>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>最近工时</h3>
+        <span class="meta">共 ${stats.hours.toFixed(1)} 小时</span></div>
+      ${logHtml}
+    </div>
+
+    ${project.note
+      ? `<div class="card"><div class="card-head"><h3>备注</h3></div>
+         <div class="meta">${escapeHtml(project.note)}</div></div>` : ""}
+
+    <div class="card">
+      <button class="btn danger" id="pj-delete">删除这个项目</button>
+    </div>
+  `;
+
+  $("pj-add-step").onclick = () => editStep(project.id, null);
+  $("pj-add-metric").onclick = () => editMetric(project.id, null);
+  $("pj-add-assess").onclick = () => editAssessment(project.id, null);
+  $("pj-delete").onclick = () => {
+    if (!confirm(`确定删除《${project.name}》？\n\n`
+        + "它的步骤、工时、分配、评估、指标都会一起删掉，不能撤销。")) return;
+    deleteProject(project.id);
+    toast("已删除");
+    showPage("dash");
+  };
+  document.querySelectorAll("#pj-body [data-step]").forEach(node => {
+    node.onclick = () => editStep(project.id, Number(node.dataset.step));
+  });
+
+  /* ---- 步骤时间轴（甘特图）----
+     把每个步骤的开始/截止画成横条，today 那天画一条竖线。
+     一眼就能看出哪些步骤是串行的、哪些已经过期还在跑。 */
+  if (steps.length) {
+    const canvas = $("step-timeline");
+    const dated = steps.filter(step => step.start_date || step.due_date).length;
+    canvas.dataset.h = String(Math.max(70, 44 + dated * 26));
+    drawTimeline(canvas, steps.map(step => ({
+      name: step.name,
+      start: step.start_date,
+      due: step.due_date,
+      progress: num(step.progress),
+      status: step.status,
+    })), {
+      height: Number(canvas.dataset.h),
+      empty: "步骤填上日期后这里显示时间轴",
+    });
+  }
+
+  /* ---- 计划 vs 实际工时（分组柱状图）----
+     「计划」来自分配（assignment 的 planned_hours），
+     「实际」来自工时记录。两者差得多的步骤就是估算失准的地方，
+     比单看总进度有用得多。 */
+  const assignments = projectAssignments(project.id);
+  const actualByStep = {};
+  /* 不传 limit：worklogsFor 里是 `if (opts.limit)`，
+     传 0 虽然也返回全部，但读起来容易误解成"一条都不要"。 */
+  worklogsFor({ project_id: project.id }).forEach(log => {
+    if (!log.step_id) return;
+    actualByStep[log.step_id] = (actualByStep[log.step_id] || 0)
+                              + num(log.hours);
+  });
+  const plannedByStep = {};
+  assignments.forEach(item => {
+    if (!item.step_id) return;
+    plannedByStep[item.step_id] = (plannedByStep[item.step_id] || 0)
+                                + num(item.planned_hours);
+  });
+
+  /* 只画有计划或有实际的步骤；两组数据都没有就画空状态 */
+  const barRows = steps.filter(step =>
+    plannedByStep[step.id] || actualByStep[step.id]).map(step => ({
+      label: step.name,
+      values: [
+        Math.round((plannedByStep[step.id] || 0) * 10) / 10,
+        Math.round((actualByStep[step.id] || 0) * 10) / 10,
+      ],
+    }));
+
+  const barsCanvas = $("project-bars");
+  barsCanvas.dataset.h = "200";
+  drawBars(barsCanvas, barRows, {
+    height: 200,
+    groupNames: ["计划", "实际"],
+    empty: "给步骤分配人力并记工时后，这里显示对比",
+  });
+}
+
+/* ============================================================
+   项目表单
+   ============================================================ */
+function editProject(id) {
+  const project = id ? getProject(id) : {
+    status: "进行中", priority: "中", progress: 0, budget: 0, cost: 0,
+  };
+  if (!project) { toast("这个项目已经不存在了"); return; }
+  openSheet(id ? "编辑项目" : "新建项目", `
+    <label for="f-name">项目名称 *</label>
+    <input id="f-name" value="${escapeHtml(project.name || "")}">
+    <label for="f-owner">负责人</label>
+    <input id="f-owner" value="${escapeHtml(project.owner || "")}">
+    <label for="f-client">客户 / 需求方</label>
+    <input id="f-client" value="${escapeHtml(project.client || "")}">
+    <div class="row2">
+      <div><label for="f-status">状态</label>
+        <select id="f-status">${optionsHtml(
+          ["规划中", "进行中", "已暂停", "已交付", "已取消"],
+          project.status || "进行中")}</select></div>
+      <div><label for="f-priority">优先级</label>
+        <select id="f-priority">${optionsHtml(
+          ["高", "中", "低"], project.priority || "中")}</select></div>
+    </div>
+    <div class="row2">
+      <div><label for="f-start">开始日期</label>
+        <input id="f-start" type="date" value="${escapeHtml(project.start_date || "")}"></div>
+      <div><label for="f-due">计划截止</label>
+        <input id="f-due" type="date" value="${escapeHtml(project.due_date || "")}"></div>
+    </div>
+    <div class="row2">
+      <div><label for="f-budget">预算</label>
+        <input id="f-budget" type="number" inputmode="decimal"
+               value="${num(project.budget) || ""}"></div>
+      <div><label for="f-cost">已花费</label>
+        <input id="f-cost" type="number" inputmode="decimal"
+               value="${num(project.cost) || ""}"></div>
+    </div>
+    <label for="f-progress">当前进度：<b id="f-progress-label">${num(project.progress)}%</b></label>
+    <input id="f-progress" type="range" min="0" max="100" step="5"
+           value="${num(project.progress)}">
+    <label for="f-note">备注</label>
+    <textarea id="f-note">${escapeHtml(project.note || "")}</textarea>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: id ? "保存" : "创建", kind: "", onClick: () => {
+      const data = {
+        name: $("f-name").value,
+        owner: $("f-owner").value,
+        client: $("f-client").value,
+        status: $("f-status").value,
+        priority: $("f-priority").value,
+        start_date: $("f-start").value,
+        due_date: $("f-due").value,
+        budget: $("f-budget").value,
+        cost: $("f-cost").value,
+        progress: $("f-progress").value,
+        note: $("f-note").value,
+      };
+      try {
+        if (id) { updateProject(id, data); toast("已保存"); }
+        else { const created = addProject(data); currentProjectId = created.id;
+               toast("已创建"); }
+        closeSheet();
+        if (id) renderProject(); else showPage("dash");
+      } catch (error) { toast(error.message); }
+    } },
+  ]);
+  const range = $("f-progress");
+  range.oninput = () => { $("f-progress-label").textContent = range.value + "%"; };
+}
+
+function optionsHtml(values, selected) {
+  return values.map(value =>
+    `<option value="${escapeHtml(value)}"`
+    + (value === selected ? " selected" : "") + `>${escapeHtml(value)}</option>`
+  ).join("");
+}
+
+/* ============================================================
+   步骤表单
+   ============================================================ */
+function editStep(projectId, stepId) {
+  const step = stepId ? DB.steps.find(item => item.id === Number(stepId))
+                      : { status: "未开始", progress: 0 };
+  if (!step) { toast("这个步骤已经不存在了"); return; }
+  const isNew = !stepId;
+  openSheet(isNew ? "新增步骤" : "编辑步骤", `
+    <label for="s-name">步骤名称 *</label>
+    <input id="s-name" value="${escapeHtml(step.name || "")}">
+    <label for="s-owner">负责人</label>
+    <input id="s-owner" value="${escapeHtml(step.owner || "")}">
+    <div class="row2">
+      <div><label for="s-status">状态</label>
+        <select id="s-status">${optionsHtml(
+          ["未开始", "进行中", "已完成", "已阻塞"], step.status || "未开始")}</select></div>
+      <div><label for="s-progress">进度</label>
+        <input id="s-progress" type="number" min="0" max="100"
+               value="${num(step.progress)}"></div>
+    </div>
+    <div class="row2">
+      <div><label for="s-start">开始日期</label>
+        <input id="s-start" type="date" value="${escapeHtml(step.start_date || "")}"></div>
+      <div><label for="s-due">计划截止</label>
+        <input id="s-due" type="date" value="${escapeHtml(step.due_date || "")}"></div>
+    </div>
+    <label for="s-note">备注</label>
+    <input id="s-note" value="${escapeHtml(step.note || "")}">
+  `, [
+    { label: "取消", onClick: closeSheet },
+    ...(isNew ? [] : [{ label: "删除", kind: "danger", onClick: () => {
+      if (!confirm("确定删除这个步骤？\n\n它上面的工时不会删，只是不再关联到步骤。")) return;
+      deleteStep(stepId); closeSheet(); renderProject(); toast("已删除");
+    } }]),
+    { label: "保存", kind: "", onClick: () => {
+      const data = {
+        name: $("s-name").value,
+        owner: $("s-owner").value,
+        status: $("s-status").value,
+        progress: $("s-progress").value,
+        start_date: $("s-start").value,
+        due_date: $("s-due").value,
+        note: $("s-note").value,
+      };
+      try {
+        if (isNew) addStep(projectId, data); else updateStep(stepId, data);
+        closeSheet(); renderProject(); toast("已保存");
+      } catch (error) { toast(error.message); }
+    } },
+  ]);
+}
+
+/* ============================================================
+   能力 / 资源 / 指标
+   ============================================================ */
+function editAssessment(projectId, assessmentId) {
+  const item = assessmentId
+    ? DB.assessments.find(row => row.id === Number(assessmentId)) : null;
+  const isNew = !item;
+  openSheet(isNew ? "新增评估" : "编辑评估", `
+    <label for="a-kind">类型</label>
+    <select id="a-kind">
+      <option value="ability"${item && item.kind === "ability" ? " selected" : ""}>
+        技术能力（这项本事够不够用）</option>
+      <option value="resource"${item && item.kind === "resource" ? " selected" : ""}>
+        有利资源（手上有什么有利条件）</option>
+    </select>
+    <label for="a-name">名称 *</label>
+    <input id="a-name" value="${escapeHtml(item ? item.name : "")}">
+    <div class="row2">
+      <div><label for="a-score">评分（1~5）</label>
+        <input id="a-score" type="number" min="1" max="5"
+               value="${item ? item.score : 3}"></div>
+      <div><label for="a-weight">权重</label>
+        <input id="a-weight" type="number" step="0.5" min="0"
+               value="${item ? item.weight : 1}"></div>
+    </div>
+    <div class="hint">权重是「这项有多重要」，用来算加权总分。</div>
+    <label for="a-note">备注</label>
+    <input id="a-note" value="${escapeHtml(item ? item.note : "")}">
+  `, [
+    { label: "取消", onClick: closeSheet },
+    ...(isNew ? [] : [{ label: "删除", kind: "danger", onClick: () => {
+      deleteAssessment(assessmentId); closeSheet(); renderProject(); toast("已删除");
+    } }]),
+    { label: "保存", kind: "", onClick: () => {
+      try {
+        addAssessment(projectId, {
+          kind: $("a-kind").value, name: $("a-name").value,
+          score: $("a-score").value, weight: $("a-weight").value,
+          note: $("a-note").value,
+        });
+        closeSheet(); renderProject(); toast("已保存");
+      } catch (error) { toast(error.message); }
+    } },
+  ]);
+}
+
+function editMetric(projectId, metricId) {
+  const item = metricId
+    ? DB.metrics.find(row => row.id === Number(metricId)) : null;
+  const names = metricNames(projectId);
+  openSheet(item ? "编辑指标" : "录入指标", `
+    <label for="m-date">日期</label>
+    <input id="m-date" type="date"
+           value="${escapeHtml(item ? item.metric_date : todayISO())}">
+    <label for="m-name">指标名</label>
+    <input id="m-name" list="m-names" value="${escapeHtml(item ? item.name : "")}">
+    <datalist id="m-names">${names.map(name =>
+      `<option value="${escapeHtml(name)}"></option>`).join("")}</datalist>
+    <div class="row2">
+      <div><label for="m-value">数值</label>
+        <input id="m-value" type="number" step="0.01" inputmode="decimal"
+               value="${item ? item.value : ""}"></div>
+      <div><label for="m-unit">单位</label>
+        <input id="m-unit" value="${escapeHtml(item ? item.unit : "")}"></div>
+    </div>
+    <div class="hint">同一个名字的多次录入会连成一条趋势曲线。</div>
+    <label for="m-note">备注</label>
+    <input id="m-note" value="${escapeHtml(item ? item.note : "")}">
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: "保存", kind: "", onClick: () => {
+      try {
+        addMetric(projectId, {
+          metric_date: $("m-date").value, name: $("m-name").value,
+          value: $("m-value").value, unit: $("m-unit").value,
+          note: $("m-note").value,
+        });
+        closeSheet(); renderProject(); toast("已记录");
+      } catch (error) { toast(error.message); }
+    } },
+  ]);
+}
+
+/* ============================================================
+   团队
+   ============================================================ */
+function renderTeam() {
+  const { rows, window: range } = loadRows();
+  /* 条数要把云端的一起算——否则员工报了一堆工时，
+     这里还显示"0 条工时"，看起来像没收到。 */
+  $("team-sub").textContent = `${activeEmployees().length} 人在岗 · `
+    + `${fetchWorklogs().length} 条工时`;
+  $("load-range").textContent = `最近 ${range.days} 天`;
+
+  const canvas = $("load-chart");
+  canvas.dataset.h = Math.max(120, 34 + rows.length * 28);
+  drawLoad(canvas, rows.map(row => ({
+    name: row.name, hours: row.hours, ratio: row.ratio,
+  })), { height: Number(canvas.dataset.h), empty: "还没有员工" });
+
+  /* 各项目工时投入（柱状）。
+     和上面的「按人负荷」是两个角度看同一批工时：
+     上面看"谁忙"，这里看"忙在哪个项目上"。
+     只算窗口内的工时，口径和人负荷保持一致。 */
+  const byProject = {};
+  worklogsFor({ date_from: range.from, date_to: range.to })
+    .forEach(log => {
+      const key = log.project_id === null
+        ? "__none__" : String(log.project_id);
+      byProject[key] = (byProject[key] || 0) + num(log.hours);
+    });
+  const projectBars = Object.keys(byProject).map(key => ({
+    label: key === "__none__" ? "非项目"
+      : (projectName(Number(key)) || "已删除"),
+    values: [Math.round(byProject[key] * 10) / 10],
+  })).sort((a, b) => b.values[0] - a.values[0]);
+
+  const projectCanvas = $("project-chart");
+  projectCanvas.dataset.h = "200";
+  $("project-range").textContent = `近 ${range.days} 天`;
+  drawBars(projectCanvas, projectBars, {
+    height: 200,
+    empty: "这段时间还没有工时记录",
+  });
+
+  /* 员工列表 + 工时列表合并在一页，手机上滚动比切页方便 */
+  const employeeHtml = rows.length ? rows.map(row => `
+    <div class="list-item tap" data-employee="${row.id}">
+      <div class="row">
+        <div class="grow"><span class="title">${escapeHtml(row.name)}</span>
+          <div class="meta">${escapeHtml(row.role || "未填岗位")}
+            ${row.level ? " · " + escapeHtml(row.level) : ""}</div></div>
+        <b class="${row.ratio > 1 ? "lv-风险" : ""}">
+          ${Math.round(row.ratio * 100)}%</b>
+      </div>
+      <div class="meta">${row.hours.toFixed(1)} 小时 / 应出 `
+        + `${row.expected.toFixed(0)} 小时</div>
+    </div>`).join("") : '<div class="meta">还没有员工，点右上「+ 人」加一个。</div>';
+
+  /* 团队页的工时列表要带上云端——员工报的必须出现在这里，
+     否则老板看到的是"没人干活"。云端记录用只读方式展示。 */
+  const logs = worklogsFor({ limit: 40, includeRemote: true });
+  const logHtml = logs.length ? logs.map(log => `
+    <div class="list-item tap" data-worklog="${log.id}">
+      <div class="row">
+        <div class="grow">
+          <b>${escapeHtml(employeeName(log.employee_id))}</b>
+          <span class="meta"> · ${escapeHtml(log.work_date)} · `
+          + `${escapeHtml(projectName(log.project_id) || "非项目")}</span>
+          ${log.source === "timer" ? '<span class="meta"> · 计时</span>' : ""}
+        </div>
+        <b>${num(log.hours).toFixed(1)}h</b>
+      </div>
+      ${log.content
+        ? `<div class="meta" style="margin-top:2px">${escapeHtml(log.content)}</div>`
+        : ""}
+    </div>`).join("") : '<div class="meta">还没有工时记录。</div>';
+
+  /* 员工列表塞进详情页太挤，直接渲染在同一个 body 里 */
+  const body = $("page-team").querySelector(".body");
+  const old = body.querySelector("#team-block");
+  if (old) old.remove();
+  const block = document.createElement("div");
+  block.id = "team-block";
+  block.innerHTML = `
+    <div class="card"><div class="card-head"><h3>成员</h3>
+      <span class="meta">点一条可以改</span></div>${employeeHtml}</div>
+    <div class="section-head"><span>工时记录</span></div>
+    <div class="card">${logHtml}</div>`;
+  body.appendChild(block);
+
+  block.querySelectorAll("[data-employee]").forEach(node => {
+    node.onclick = () => editEmployee(Number(node.dataset.employee));
+  });
+  block.querySelectorAll("[data-worklog]").forEach(node => {
+    node.onclick = () => editWorklog(Number(node.dataset.worklog));
+  });
+}
+
+function editEmployee(id) {
+  const employee = id ? getEmployee(id) : { active: 1, weekly_hours: 40 };
+  if (!employee) { toast("这个人已经不在名单里了"); return; }
+  const isNew = !id;
+  openSheet(isNew ? "新增员工" : "编辑员工", `
+    <label for="e-name">姓名 *</label>
+    <input id="e-name" value="${escapeHtml(employee.name || "")}">
+    <div class="row2">
+      <div><label for="e-role">岗位</label>
+        <input id="e-role" value="${escapeHtml(employee.role || "")}"></div>
+      <div><label for="e-level">职级</label>
+        <input id="e-level" value="${escapeHtml(employee.level || "")}"></div>
+    </div>
+    <label for="e-weekly">周工时基准</label>
+    <input id="e-weekly" type="number" step="1" min="0"
+           value="${num(employee.weekly_hours) || 40}">
+    <div class="hint">用来算负荷率：这个人是 40 小时制，还是兼职 20 小时。</div>
+    <div class="row2">
+      <div><label for="e-hired">入职日期</label>
+        <input id="e-hired" type="date"
+               value="${escapeHtml(employee.hired_date || "")}"></div>
+      <div><label for="e-active">状态</label>
+        <select id="e-active">
+          <option value="1"${employee.active !== 0 ? " selected" : ""}>在职</option>
+          <option value="0"${employee.active === 0 ? " selected" : ""}>离职</option>
+        </select></div>
+    </div>
+    <label for="e-note">备注</label>
+    <input id="e-note" value="${escapeHtml(employee.note || "")}">
+  `, [
+    { label: "取消", onClick: closeSheet },
+    ...(isNew ? [] : [{ label: "删除", kind: "danger", onClick: () => {
+      if (!confirm(`确定删除 ${employee.name}？\n\n`
+          + "他报的工时和分配会一起删掉。\n"
+          + "如果只是想让他不出现在名单里，改成「离职」更好——"
+          + "历史工时会保留。")) return;
+      deleteEmployee(id); closeSheet(); renderTeam(); toast("已删除");
+    } }]),
+    { label: "保存", kind: "", onClick: () => {
+      const data = {
+        name: $("e-name").value, role: $("e-role").value,
+        level: $("e-level").value, weekly_hours: $("e-weekly").value,
+        hired_date: $("e-hired").value, active: $("e-active").value,
+        note: $("e-note").value,
+      };
+      try {
+        if (isNew) addEmployee(data); else updateEmployee(id, data);
+        closeSheet(); renderTeam(); toast("已保存");
+      } catch (error) { toast(error.message); }
+    } },
+  ]);
+}
+
+/* ============================================================
+   工时表单
+   ============================================================ */
+function editWorklog(id) {
+  if (!activeEmployees().length) {
+    toast("先加一个员工");
+    editEmployee(null);
+    return;
+  }
+  const log = id ? DB.worklogs.find(row => row.id === Number(id)) : null;
+  if (id && !log) { toast("这条工时已经不存在了"); return; }
+  const isNew = !log;
+  const draft = log || { work_date: todayISO(), hours: 8, source: "manual" };
+
+  openSheet(isNew ? "记一笔工时" : "修改工时", `
+    <label for="w-employee">谁</label>
+    <select id="w-employee">${activeEmployees().map(employee =>
+      `<option value="${employee.id}"`
+      + (draft.employee_id === employee.id ? " selected" : "")
+      + `>${escapeHtml(employee.name)}</option>`).join("")}</select>
+    <label for="w-project">项目</label>
+    <select id="w-project"><option value="">（非项目事务）</option>
+      ${DB.projects.map(project =>
+        `<option value="${project.id}"`
+        + (draft.project_id === project.id ? " selected" : "")
+        + `>${escapeHtml(project.name)}</option>`).join("")}</select>
+    <label for="w-step">步骤（可选）</label>
+    <select id="w-step"></select>
+    <div class="row2">
+      <div><label for="w-date">日期</label>
+        <input id="w-date" type="date" value="${escapeHtml(draft.work_date || todayISO())}"></div>
+      <div><label for="w-hours">工时</label>
+        <input id="w-hours" type="number" step="0.5" min="0.5" max="24"
+               value="${num(draft.hours) || 8}"></div>
+    </div>
+    <label for="w-content">做了什么</label>
+    <textarea id="w-content">${escapeHtml(draft.content || "")}</textarea>
+    ${log && log.source === "timer"
+      ? '<div class="hint">这条是计时器记的。改小时数等于推翻了计时结论，'
+        + "改之前先想一下是不是该重新解释。</div>" : ""}
+  `, [
+    { label: "取消", onClick: closeSheet },
+    ...(isNew ? [] : [{ label: "删除", kind: "danger", onClick: () => {
+      if (!confirm("确定删除这条工时？")) return;
+      deleteWorklog(id); closeSheet(); renderTeam(); toast("已删除");
+    } }]),
+    { label: "保存", kind: "", onClick: () => saveWorklog(id) },
+  ]);
+
+  $("w-project").onchange = () =>
+    fillStepSelect($("w-step"), $("w-project").value, draft.step_id);
+  fillStepSelect($("w-step"), draft.project_id, draft.step_id);
+}
+
+function fillStepSelect(select, projectId, selectedId) {
+  const steps = projectId ? projectSteps(Number(projectId)) : [];
+  select.innerHTML = '<option value="">不指定步骤</option>'
+    + steps.map(step => `<option value="${step.id}"`
+        + (Number(selectedId) === step.id ? " selected" : "")
+        + `>${escapeHtml(step.name)}</option>`).join("");
+}
+
+function saveWorklog(id) {
+  const data = {
+    employee_id: $("w-employee").value,
+    project_id: $("w-project").value,
+    step_id: $("w-step").value,
+    work_date: $("w-date").value,
+    hours: $("w-hours").value,
+    content: $("w-content").value,
+  };
+  try {
+    if (id) {
+      updateWorklog(id, data);
+      closeSheet(); renderTeam(); toast("已保存");
+      return;
+    }
+    addWorklog(data, { allowDuplicate: false });
+    closeSheet(); renderTeam(); toast("已记录");
+  } catch (error) {
+    /* 重复的提示带前缀，单独处理——要问用户是否继续 */
+    if (String(error.message).indexOf("DUPLICATE:") === 0) {
+      const detail = String(error.message).slice("DUPLICATE:".length);
+      if (confirm(`已经有一样的记录了：\n${detail}\n\n`
+          + "如果确实是两段分开的工作，就继续记。")) {
+        try {
+          addWorklog(data, { allowDuplicate: true });
+          closeSheet(); renderTeam(); toast("已记录");
+        } catch (second) { toast(second.message); }
+      }
+      return;
+    }
+    toast(error.message);
+  }
+}
+
+/* ============================================================
+   小助手
+   ============================================================ */
+let chat = [];
+
+/* 按回答内容挑表情。
+   **这是表情真正有用的地方**：不用读完整段话，
+   看头像就知道这条回答是"好消息"还是"要出事了"。
+   关键词匹配不精确，但这里只需要情绪方向，不需要语义理解。 */
+function moodForAnswer(answer) {
+  const text = String(answer || "");
+  if (/严重|超期|逾期|已经超|失控/.test(text)) return "alarm";
+  if (/风险|超预算|超支|阻塞|卡住|异常|需要处理|注意/.test(text)) return "warn";
+  if (/没理解|没找到|不清楚|换个问法|不认识/.test(text)) return "puzzled";
+  if (/健康|正常|没问题|都在范围|没有发现/.test(text)) return "happy";
+  if (/建议|可以|不妨|最好/.test(text)) return "warm";
+  return "ok";
+}
+
+function bubbleHtml(item) {
+  const mine = item.me;
+  const mood = item.mood || (mine ? "neutral" : "ok");
+  /* 机器人的回答带圆形头像；自己的消息不带——
+     两边都放头像会让对话显得很乱。 */
+  const avatar = mine ? ""
+    : `<img class="avatar-round sticker" src="${faceSrc(mood)}" alt="">`;
+  return `<div class="bubble-row ${mine ? "me" : "bot"}">`
+       + avatar
+       + `<div class="bubble ${mine ? "me" : "bot"}">`
+       + escapeHtml(item.text) + "</div></div>";
+}
+
+function renderAssist() {
+  const extra = urgentSuggestions();
+  const chips = SUGGESTIONS.concat(extra);
+  $("assist-chips").innerHTML = chips.map(item =>
+    `<button class="chip" data-ask="${escapeHtml(item)}">${escapeHtml(item)}</button>`
+  ).join("");
+  document.querySelectorAll("#assist-chips .chip").forEach(button => {
+    button.onclick = () => sendAsk(button.dataset.ask);
+  });
+
+  const box = $("chat");
+  if (chat.length) {
+    box.innerHTML = chat.map(bubbleHtml).join("");
+  } else {
+    /* 空状态：用整身立绘 + 羽化，比一个圆头像更有形象感 */
+    box.innerHTML = `
+      <div class="assist-empty">
+        <img class="hero-art sticker" src="${heroSrc("watch")}" alt="">
+        <div class="bubble bot">数据都在本机，所有结论按固定判据算出来，
+          不联网，也不猜。<br><br>问点什么，或者点上面的按钮。</div>
+      </div>`;
+  }
+  const last = box.lastElementChild;
+  if (last) last.scrollIntoView({ block: "nearest" });
+}
+
+function sendAsk(text) {
+  const question = String(text || "").trim();
+  if (!question) return;
+  $("ask").value = "";
+  chat.push({ me: true, text: question });
+  let answer;
+  let mood = "ok";
+  try {
+    answer = ask(question);
+    mood = moodForAnswer(answer);
+  } catch (error) {
+    answer = "算的时候出错了：" + error.message;
+    mood = "puzzled";
+  }
+  chat.push({ me: false, text: answer, mood: mood });
+  if (chat.length > 60) chat = chat.slice(-60);
+  saveSetting("chat", chat);
+  renderAssist();
+}
+
+/* ============================================================
+   导入 / 导出
+   ============================================================ */
+function pickFile(onPick) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".json,application/json";
+  input.onchange = () => {
+    if (input.files && input.files[0]) onPick(input.files[0]);
+  };
+  input.click();
+}
+
+function download(filename, data) {
+  const blob = new Blob([data], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function stamp() {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+       + `_${pad(now.getHours())}${pad(now.getMinutes())}`;
+}
+
+/* 导出整库。这个格式和电脑版的「手机快照」是一样的，
+   所以电脑那边可以原样读；手机也能读电脑导出的快照。 */
+function exportDatabase() {
+  const payload = {
+    format: "ProjectRecorder.snapshot",
+    version: 1,
+    exported_at: nowISO(),
+    source: "mobile",
+    range: { from: "", to: "" },
+    note: "从手机版导出",
+    employees: DB.employees,
+    projects: DB.projects.map(project => Object.assign({}, project, {
+      steps: projectSteps(project.id),
+      assessments: projectAssessments(project.id),
+      metrics: projectMetrics(project.id),
+    })),
+    assignments: DB.assignments,
+    /* 习惯也导出。电脑端暂时不认这两个字段（会忽略掉），
+       但**手机自己导入时要用**，所以必须带——
+       否则换手机或者重装，打卡记录就全没了。
+
+       打卡记录里**存习惯名字而不只是 id**：id 是每台机器各自
+       自增的，换一台机器就对不上了。名字才是稳定标识。 */
+    habits: DB.habits,
+    habitLogs: DB.habitLogs.map(log => {
+      const habit = habitById(log.habit_id);
+      return {
+        habit_name: habit ? habit.name : "",
+        habit_id: log.habit_id,
+        log_date: log.log_date,
+        value: num(log.value),
+        note: log.note || "",
+        done_at: log.done_at || "",
+      };
+    }),
+    worklogs: DB.worklogs.map(log => ({
+      employee: employeeName(log.employee_id),
+      project: projectName(log.project_id),
+      step: stepName(log.step_id),
+      work_date: log.work_date,
+      hours: num(log.hours),
+      content: log.content || "",
+      source: log.source || "manual",
+      key: "",
+    })),
+  };
+  download(`项目快照_${stamp()}.json`, JSON.stringify(payload, null, 1));
+  closeSheet();
+  toast("已导出，把文件发给电脑即可");
+}
+
+/* 导入整库：**合并**而不是覆盖，否则会丢掉本地记的东西。
+   合并规则按 id 判断，两边都有的取 updated_at 新的那个。 */
+function importDatabase(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data;
+    try {
+      data = JSON.parse(reader.result);
+    } catch (error) {
+      toast("这个文件解析不了：" + error.message);
+      return;
+    }
+    const format = data && data.format;
+    if (format === "ProjectRecorder.snapshot") {
+      mergeSnapshot(data);
+    } else if (format === "ProjectRecorder.worklog") {
+      /* 电脑版导出的「员工工时文件」：只有一个人的一段工时。
+         按名字找人和项目，找不到就跳过并报告——和电脑端的规则一致。 */
+      mergeWorklogFile(data);
+    } else {
+      toast("这不是本程序导出的文件");
+      return;
+    }
+    closeSheet();
+    showPage("dash");
+  };
+  reader.onerror = () => toast("读不了这个文件");
+  reader.readAsText(file, "utf-8");
+}
+
+/* 兼容旧名字：主菜单里那条「导入电脑导出的快照」 */
+function importSnapshot(file) { importDatabase(file); }
+
+function mergeSnapshot(data) {
+  let added = { project: 0, employee: 0, worklog: 0, step: 0,
+                habit: 0, habitLog: 0 };
+  const nameToEmployee = {};
+  const nameToProject = {};
+
+  /* 员工：按名字认，没有就新建 */
+  (data.employees || []).forEach(incoming => {
+    let existing = employeeByName(incoming.name);
+    if (!existing) {
+      try {
+        existing = addEmployee(incoming);
+        added.employee += 1;
+      } catch (error) { existing = null; }
+    }
+    if (existing) nameToEmployee[incoming.name] = existing.id;
+  });
+  DB.employees.forEach(employee => { nameToEmployee[employee.name] = employee.id; });
+
+  /* 项目：按名字认。两边都有就取 updated_at 新的那个覆盖本地。 */
+  (data.projects || []).forEach(incoming => {
+    const existing = DB.projects.find(item => item.name === incoming.name);
+    if (!existing) {
+      try {
+        const created = addProject(incoming);
+        nameToProject[incoming.name] = created.id;
+        added.project += 1;
+        (incoming.steps || []).forEach(step => {
+          try { addStep(created.id, step); added.step += 1; } catch (error) { /* 跳过 */ }
+        });
+        (incoming.assessments || []).forEach(item => {
+          try { addAssessment(created.id, item); } catch (error) { /* 跳过 */ }
+        });
+        (incoming.metrics || []).forEach(item => {
+          try { addMetric(created.id, item); } catch (error) { /* 跳过 */ }
+        });
+      } catch (error) { /* 名字为空之类，跳过 */ }
+      return;
+    }
+    nameToProject[incoming.name] = existing.id;
+    const mine = existing.updated_at || "";
+    const theirs = incoming.updated_at || "";
+    if (theirs && theirs > mine) {
+      try { updateProject(existing.id, incoming); } catch (error) { /* 跳过 */ }
+    }
+    /* 步骤按名字合并 */
+    const seen = {};
+    projectSteps(existing.id).forEach(step => { seen[step.name] = true; });
+    (incoming.steps || []).forEach(step => {
+      if (seen[step.name]) return;
+      try { addStep(existing.id, step); added.step += 1; } catch (error) { /* 跳过 */ }
+    });
+  });
+  DB.projects.forEach(project => { nameToProject[project.name] = project.id; });
+
+  /* 工时：按「人 + 项目 + 日期 + 工时 + 说明」去重后并入。
+     这条规则和电脑端的导入完全一致，所以两边反复互导也不会重复。 */
+  (data.worklogs || []).forEach(incoming => {
+    const employeeId = nameToEmployee[incoming.employee];
+    if (!employeeId) return;
+    const projectId = incoming.project
+      ? nameToProject[incoming.project] : null;
+    if (incoming.project && !projectId) return;   // 未知项目跳过
+    const probe = {
+      employee_id: employeeId, project_id: projectId,
+      work_date: incoming.work_date, hours: num(incoming.hours),
+      content: incoming.content || "",
+    };
+    const twin = DB.worklogs.find(row =>
+      row.employee_id === probe.employee_id
+      && row.project_id === probe.project_id
+      && row.work_date === probe.work_date
+      && Math.abs(num(row.hours) - probe.hours) < 0.001
+      && String(row.content || "") === probe.content);
+    if (twin) return;
+    try {
+      addWorklog(Object.assign({}, probe, {
+        source: incoming.source === "timer" ? "timer" : "manual",
+      }), { allowDuplicate: true });
+      added.worklog += 1;
+    } catch (error) { /* 脏数据跳过 */ }
+  });
+
+  /* 习惯：按名字认，已有的保留本地（不覆盖打卡记录），
+     新的加进来。打卡记录按「习惯 + 日期」去重后并入。 */
+  const habitByName = {};
+  DB.habits.forEach(habit => { habitByName[habit.name] = habit.id; });
+  (data.habits || []).forEach(incoming => {
+    if (!incoming || !incoming.name) return;
+    if (habitByName[incoming.name]) return;      // 已存在，跳过
+    try {
+      const created = addHabit(incoming);
+      habitByName[incoming.name] = created.id;
+      added.habit += 1;
+    } catch (error) { /* 数据不完整就跳过 */ }
+  });
+
+  (data.habitLogs || []).forEach(incoming => {
+    const habitId = habitByName[incoming.habit_name]
+      || (incoming.habit_id && habitById(incoming.habit_id)
+          ? Number(incoming.habit_id) : null);
+    if (!habitId || !incoming.log_date) return;
+    if (habitLogOn(habitId, incoming.log_date)) return;   // 那天已有记录
+    DB.habitLogs.push({
+      id: nextId("habitLog"),
+      habit_id: habitId,
+      log_date: String(incoming.log_date),
+      value: num(incoming.value) || 1,
+      note: String(incoming.note || ""),
+      done_at: incoming.done_at || nowISO(),
+    });
+    added.habitLog += 1;
+  });
+  if (added.habitLog) _save();
+
+  renderDash();
+  const habitNote = (added.habit || added.habitLog)
+    ? `、${added.habit} 条习惯、${added.habitLog} 次打卡` : "";
+  toast(`已合并：新增 ${added.project} 个项目、`
+    + `${added.employee} 人、${added.worklog} 条工时${habitNote}`);
+}
+
+/* 电脑版的员工工时文件：一个人、一段时间的工时 */
+function mergeWorklogFile(data) {
+  const employeeNameValue = data.employee && data.employee.name;
+  if (!employeeNameValue) { toast("文件里没说是谁提交的"); return; }
+  let employee = employeeByName(employeeNameValue);
+  let createdEmployee = false;
+  if (!employee) {
+    try {
+      employee = addEmployee(data.employee);
+      createdEmployee = true;
+    } catch (error) { toast("建不了这个员工：" + error.message); return; }
+  }
+  let added = 0;
+  let duplicated = 0;
+  const unknown = [];
+  (data.entries || []).forEach(entry => {
+    const project = entry.project
+      ? DB.projects.find(item => item.name === entry.project) : null;
+    if (entry.project && !project) {
+      if (unknown.indexOf(entry.project) === -1) unknown.push(entry.project);
+      return;
+    }
+    const projectId = project ? project.id : null;
+    let stepId = null;
+    if (entry.step && project) {
+      const step = projectSteps(project.id).find(item => item.name === entry.step);
+      if (step) stepId = step.id;
+    }
+    const twin = DB.worklogs.find(row =>
+      row.employee_id === employee.id
+      && row.project_id === projectId
+      && row.work_date === entry.work_date
+      && Math.abs(num(row.hours) - num(entry.hours)) < 0.001
+      && String(row.content || "") === String(entry.content || ""));
+    if (twin) { duplicated += 1; return; }
+    try {
+      addWorklog({
+        employee_id: employee.id, project_id: projectId, step_id: stepId,
+        work_date: entry.work_date, hours: entry.hours,
+        content: entry.content, source: entry.source,
+      }, { allowDuplicate: true });
+      added += 1;
+    } catch (error) { /* 跳过脏数据 */ }
+  });
+
+  let message = `新增 ${added} 条工时`;
+  if (duplicated) message += `，已存在跳过 ${duplicated} 条`;
+  if (createdEmployee) message = `（新建员工 ${employeeNameValue}）` + message;
+  if (unknown.length) message += `；${unknown.join("、")} 不在项目列表里，已跳过`;
+  renderDash();
+  toast(message);
+}
+
+/* ---------------------------------------------------------- 启动 */
+document.addEventListener("DOMContentLoaded", () => {
+  try {
+    chat = getSetting("chat", []);
+    if (!Array.isArray(chat)) chat = [];
+    boot();
+  } catch (error) {
+    showBootError("启动失败", error.message + "\n\n" + (error.stack || ""));
+  }
+});
