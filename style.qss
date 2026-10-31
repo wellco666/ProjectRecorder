@@ -361,6 +361,11 @@ QDialog {
     color: $fg_dim;
     font-size: 12px;
 }
+#DialogTitle {
+    color: $fg_strong;
+    font-size: 18px;
+    font-weight: 700;
+}
 QDialogButtonBox QPushButton, QMessageBox QPushButton {
     background-color: $btn_bg;
     color: $fg_soft;
@@ -489,4 +494,231 @@ QScrollBar::add-line, QScrollBar::sub-line {
 }
 QScrollBar::add-page, QScrollBar::sub-page {
     background: transparent;
+}
+
+
+/* ===== 知识星球 ===== */
+#KnowledgeTitle {
+    font-size: 23px;
+    font-weight: 700;
+    color: $fg_strong;
+}
+#KnowledgeSubtitle {
+    font-size: 12.5px;
+    color: $fg_dim;
+}
+#KnowledgeSide, #KnowledgeMapFrame, #KnowledgeDetailPanel {
+    background-color: $bg_panel;
+    border: 1px solid $line;
+    border-radius: 10px;
+}
+#KnowledgeSide {
+    background-color: $bg_read;
+}
+#KnowledgeDetailScroll {
+    background-color: transparent;
+    border: none;
+}
+#KnowledgeDetailScroll > QWidget > QWidget {
+    background-color: transparent;
+}
+#KnowledgeCount {
+    color: $accent_dim;
+    font-size: 16px;
+    font-weight: 700;
+}
+#KnowledgeList {
+    background-color: transparent;
+    border: none;
+    outline: none;
+}
+#KnowledgeList::item {
+    background-color: $bg_panel;
+    color: $fg_soft;
+    border: 1px solid $line_soft;
+    border-radius: 8px;
+    padding: 7px 9px;
+}
+#KnowledgeList::item:hover {
+    background-color: $hover;
+    border-color: $line_input;
+}
+#KnowledgeList::item:selected {
+    background-color: $accent_wash;
+    border-color: $accent_edge;
+    color: $fg_strong;
+}
+#KnowledgeEyebrow {
+    color: $accent_dim;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+#KnowledgeDetailTitle {
+    color: $fg_strong;
+    font-size: 19px;
+    font-weight: 700;
+}
+#KnowledgeMetaLine {
+    color: $fg_dim;
+    font-size: 11.5px;
+}
+#KnowledgeContent {
+    color: $fg_read;
+    background-color: $bg_read;
+    border: 1px solid $bg_read_line;
+    border-radius: 8px;
+    padding: 10px;
+    line-height: 1.45;
+}
+#KnowledgeTags {
+    color: $accent_dim;
+    background-color: $accent_wash;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+}
+#KnowledgeRelated {
+    color: $fg_soft;
+    background-color: $bg_read;
+    border: 1px solid $line_soft;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 11.5px;
+}
+#KnowledgeReflection {
+    color: $fg_soft;
+    background-color: $bg_read;
+    border-left: 3px solid $accent;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 11.5px;
+}
+#KnowledgeMapFrame {
+    background-color: #101928;
+}
+
+
+/* ===== 知识星球 · 社区 ===== */
+#CommunityFeedPanel, #CommunitySidePanel {
+    background-color: $bg_panel;
+    border: 1px solid $line;
+    border-radius: 10px;
+}
+#CommunityFeedScroll, #CommunityFeedContent {
+    background-color: transparent;
+    border: none;
+}
+#CommunityIdentity {
+    color: $accent_dim;
+    background-color: $accent_wash;
+    border: 1px solid $accent_edge;
+    border-radius: 9px;
+    padding: 4px 10px;
+    font-size: 11.5px;
+    font-weight: 600;
+}
+#CommunityFeedStatus {
+    color: $fg_dim;
+    font-size: 11px;
+}
+#CommunityMessageCard {
+    background-color: $bg_read;
+    border: 1px solid $line_soft;
+    border-radius: 10px;
+}
+#CommunityMessageCard:hover {
+    border-color: $accent_edge;
+}
+#CommunityAuthor {
+    color: $fg_strong;
+    font-size: 12.5px;
+    font-weight: 700;
+}
+#CommunityRolePill, #CommunityMinePill {
+    color: $accent_dim;
+    background-color: $accent_wash;
+    border-radius: 7px;
+    padding: 1px 6px;
+    font-size: 10.5px;
+    font-weight: 600;
+}
+#CommunityMinePill {
+    color: $fg_dim;
+    background-color: $btn_bg_off;
+}
+#CommunityMeta {
+    color: $fg_dim;
+    font-size: 10.5px;
+}
+#CommunityMessageBody {
+    color: $fg_read;
+    font-size: 13px;
+}
+#CommunityDeleteButton {
+    color: $fg_dim;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 3px 7px;
+    font-size: 10.5px;
+}
+#CommunityDeleteButton:hover {
+    color: $warn;
+    background-color: $hover;
+}
+#CommunityProfileName {
+    color: $fg_strong;
+    font-size: 17px;
+    font-weight: 700;
+}
+#CommunityProfileRole, #CommunityHint, #CommunityRule {
+    color: $fg_dim;
+    font-size: 11.5px;
+}
+#CommunityHint {
+    background-color: $bg_read;
+    border-left: 3px solid $accent;
+    border-radius: 6px;
+    padding: 8px 10px;
+}
+#CommunityCharCount {
+    color: $fg_dim;
+    font-size: 10.5px;
+}
+#CommunityEmptyCard {
+    background-color: $bg_read;
+    border: 1px dashed $line_input;
+    border-radius: 10px;
+}
+#CommunityEmptyTitle {
+    color: $fg_strong;
+    font-size: 15px;
+    font-weight: 600;
+}
+#CommunityEmptyBody {
+    color: $fg_dim;
+    font-size: 12px;
+}
+#CommunityErrorText {
+    color: $warn;
+    background-color: $bg_read;
+    border: 1px solid $accent_edge;
+    border-radius: 7px;
+    padding: 8px 10px;
+}
+#CommunityFieldLabel {
+    color: $fg_soft;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+/* 禁用态放在最后，确保覆盖各按钮的基础强调色 */
+QPushButton#PrimaryButton:disabled {
+    background-color: $btn_bg_off;
+    color: $disabled_fg;
+}
+QLineEdit:disabled, QTextEdit:disabled, QComboBox:disabled {
+    background-color: $btn_bg_off;
+    color: $disabled_fg;
 }

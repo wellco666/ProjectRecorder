@@ -4,7 +4,7 @@
     py clear_data.py           # 列出当前内容，问你要不要清
     py clear_data.py --yes     # 不问，直接清
 
-项目、员工、工时、分配、评估、指标全部删除。
+项目、员工、工时、分配、评估、指标、知识星球全部删除。
 **只删数据库内容，不删文件本身**——表结构会保留，清完可以直接用。
 
 什么时候用得上：想把库清干净从零开始，又不想手动去删 sqlite 文件。
@@ -22,6 +22,9 @@ TABLES = [
     ("assignment", "任务分配"),
     ("assessment", "能力与资源评估"),
     ("metric", "指标数据"),
+    ("knowledge", "知识星体"),
+    ("knowledge_link", "知识关联"),
+    ("knowledge_reflection", "知识反思"),
 ]
 
 
@@ -66,7 +69,8 @@ def main():
         # 重置自增序号，新建的项目从 1 开始
         store.execute(
             "DELETE FROM sqlite_sequence WHERE name IN "
-            "('project','step','employee','worklog','assignment','assessment','metric')"
+            "('project','step','employee','worklog','assignment','assessment',"
+            "'metric','knowledge','knowledge_link','knowledge_reflection')"
         )
         print("\n已清空。")
         print("当前内容：")

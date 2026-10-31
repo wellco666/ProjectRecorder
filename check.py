@@ -290,10 +290,79 @@ def check_data_layer():
         assert store.metric_names(project_id) == ["到货率"]
         assert len(store.dashboard_rows()) == 1
         assert len(store.hours_by_employee()) == 1
-        print("数据层：读写正常")
+        knowledge_a = store.add_knowledge({
+            "title": "复盘要写证据", "zone": "实际知识",
+            "kind": "显性知识", "tags": "复盘,证据",
+            "project_id": project_id, "importance": 5,
+        })
+        knowledge_b = store.add_knowledge({
+            "title": "客户沉默可能不是满意", "zone": "潜在知识",
+            "kind": "隐性知识", "tags": "客户,复盘", "status": "种子",
+        })
+        store.add_knowledge_link(knowledge_a, knowledge_b, "反例", "待验证")
+        store.add_knowledge_reflection(knowledge_a, "证据够吗？", "还不够。")
+        k_stats = store.knowledge_stats()
+        assert k_stats["total"] == 2
+        assert k_stats["explicit"] == 1 and k_stats["tacit"] == 1
+        assert k_stats["seed"] == 1 and k_stats["reflections"] == 1
+        assert len(store.knowledge_links()) == 1
+        assert len(store.knowledge_items(keyword="证据")) == 1
+        print("数据层：读写正常（含知识星球）")
         return True
     finally:
         store.close()
+
+
+def check_community_client():
+    """社区客户端：登录、刷新、读取、发布、删除的参数和返回值。"""
+    import community_client as cc
+
+    original = cc._request
+    calls = []
+
+    def fake_request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        if path == "/rest/v1/rpc/login_email":
+            assert kwargs["body"]["p_code"] == "boss001"
+            return {"status": "ok", "email": "boss001@boss.pr"}
+        if path == "/auth/v1/token":
+            if kwargs.get("params", {}).get("grant_type") == "refresh_token":
+                return {"access_token": "refreshed", "refresh_token": "refresh-2",
+                        "expires_in": 3600, "user": {"id": "user-1"}}
+            return {"access_token": "token-1", "refresh_token": "refresh-1",
+                    "expires_in": 3600, "user": {"id": "user-1"}}
+        if path == "/rest/v1/profiles":
+            return [{"id": "user-1", "name": "林墨", "role": "boss",
+                     "code": "boss001"}]
+        if path == "/rest/v1/community_posts":
+            return [{"id": "post-1", "content": "大家好",
+                     "author_name": "林墨", "author_role": "boss"}]
+        if path == "/rest/v1/rpc/post_community_message":
+            assert kwargs["body"]["p_content"] == "大家好"
+            return {"ok": True, "id": "post-1"}
+        if path == "/rest/v1/rpc/delete_my_community_message":
+            return True
+        raise AssertionError(f"unexpected community request: {path}")
+
+    cc._request = fake_request
+    try:
+        client = cc.CommunityClient()
+        session = client.login("boss001", "secret")
+        assert session.access_token == "token-1"
+        assert session.name == "林墨" and session.role == "boss"
+        posts = client.list_posts(session)
+        assert posts[0]["content"] == "大家好"
+        assert client.publish(session, "大家好", "分享")["ok"] is True
+        assert client.delete_post(session, "post-1") is True
+        session.expires_at = 0
+        refreshed = client.refresh(session)
+        assert refreshed.access_token == "refreshed"
+        assert cc.CommunitySession.from_dict(session.to_dict()).user_id == "user-1"
+        assert any(path.endswith("login_email") for _, path, _ in calls)
+        print("社区客户端：登录、消息读取、发布、删除、刷新正常")
+        return True
+    finally:
+        cc._request = original
 
 
 def check_rules():
@@ -2064,6 +2133,7 @@ def main():
         ("检查器自身", check_checker),
         ("图表", check_charts),
         ("数据层", check_data_layer),
+        ("社区客户端", check_community_client),
         ("预测引擎", check_rules),
         ("小助手", check_assistant),
         ("洞察引擎", check_insights),

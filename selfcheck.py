@@ -101,8 +101,8 @@ def main():
 
     # ---- 4. 各页面 ----
     print("\n[4] 页面")
-    for name in ("dashboard", "assistant_page", "employee_page",
-                 "staffing_page", "timer_bar"):
+    for name in ("dashboard", "knowledge_page", "assistant_page",
+                 "employee_page", "staffing_page", "timer_bar"):
         widget = getattr(window, name, None)
         if widget is None:
             print(f"  [缺失] {name} —— 主窗口上没有这个属性")
@@ -128,6 +128,32 @@ def main():
         return pixmap.width()
 
     from chart import BarChart, LoadChart, TimelineChart, TrendChart
+    from knowledge_planet import IcebergWidget, KnowledgeOrbit
+
+    samples = [
+        {"id": 1, "title": "客户访谈要记录原话", "zone": "实际知识",
+         "kind": "显性知识", "status": "已沉淀", "importance": 5},
+        {"id": 2, "title": "沉默也可能是满意", "zone": "潜在知识",
+         "kind": "隐性知识", "status": "探索中", "importance": 3},
+        {"id": 3, "title": "跨项目复用复盘模板", "zone": "关联知识",
+         "kind": "显性知识", "status": "已沉淀", "importance": 4},
+        {"id": 4, "title": "先记下再说", "zone": "原始知识",
+         "kind": "隐性知识", "status": "种子", "importance": 2},
+    ]
+    orbit = step("构造 KnowledgeOrbit", KnowledgeOrbit)
+    if orbit is not None:
+        step("KnowledgeOrbit 空数据", lambda: paint_chart(orbit, "orbit-empty"))
+        step("KnowledgeOrbit 有数据", lambda: (
+            orbit.set_data(samples, [{"from_id": 1, "to_id": 3,
+                                      "relation": "同频"}]),
+            paint_chart(orbit, "orbit-data"),
+        )[-1])
+    iceberg = step("构造 IcebergWidget", IcebergWidget)
+    if iceberg is not None:
+        step("IcebergWidget 绘制", lambda: (
+            iceberg.set_counts(7, 4), paint_chart(iceberg, "iceberg")
+        )[-1])
+
 
     trend = step("构造 TrendChart", TrendChart)
     if trend is not None:
@@ -207,9 +233,16 @@ def main():
     print("\n[6] 对话框")
     from detail import ImportDialog, ProjectDialog, SubmitWindow, StepDialog
     from timer_ui import SessionListDialog
+    from community_ui import CommunityLoginDialog, CommunityMessageCard
 
     step("SubmitWindow（员工导出）", lambda: SubmitWindow(window))
     step("ProjectDialog（新建项目）", lambda: ProjectDialog(window, None))
+    step("CommunityLoginDialog（社区登录）", lambda: CommunityLoginDialog(window))
+    step("CommunityMessageCard（社区消息）", lambda: CommunityMessageCard({
+        "id": "post-1", "author_name": "林墨", "author_role": "boss",
+        "topic": "分享", "content": "所有成员都能看到这条消息",
+        "created_at": "2026-10-31T09:00:00+08:00",
+    }, is_mine=True))
 
     project_rows = window.store.projects()
     if project_rows:

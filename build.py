@@ -33,6 +33,7 @@ BUNDLED = [
     ("style.qss", "."),
     ("README.md", "."),
     ("preview.html", "."),
+    ("mobile/sql/community.sql", "."),
 ]
 
 #: 这些模块程序里用不到，排掉能省不少体积
@@ -51,6 +52,7 @@ EXCLUDES = [
 HIDDEN = [
     "db", "rules", "theme", "widgets", "chart", "detail", "export", "metrics",
     "server", "server_pages", "submit", "timer", "timer_ui",
+    "knowledge_planet", "community_client", "community_ui",
 ]
 
 

@@ -133,11 +133,51 @@ def _sheets(store):
         forecasts,
     ))
 
+    knowledge_rows = [
+        [row["title"], row["zone"], row["kind"], row["status"],
+         row["project_name"] or "", row["importance"], row["tags"],
+         row["source"], row["next_review"], row["content"],
+         row["created_at"], row["updated_at"]]
+        for row in store.knowledge_items()
+    ]
+    data.append((
+        "知识星体",
+        ["标题", "认知区域", "知识类型", "沉淀阶段", "关联项目", "重要度",
+         "标签", "来源", "下次回看", "认知内容", "创建时间", "更新时间"],
+        knowledge_rows,
+    ))
+
+    knowledge_links = [
+        [row["from_title"], row["relation"], row["to_title"], row["note"],
+         row["created_at"]]
+        for row in store.knowledge_links()
+    ]
+    data.append((
+        "知识关联",
+        ["起点", "关系", "终点", "说明", "创建时间"],
+        knowledge_links,
+    ))
+
+    knowledge_reflections = [
+        [row["title"], row["prompt"], row["content"], row["created_at"]]
+        for row in store.query(
+            """SELECT r.*, k.title FROM knowledge_reflection r
+               JOIN knowledge k ON k.id = r.knowledge_id
+               ORDER BY r.created_at DESC, r.id DESC"""
+        )
+    ]
+    data.append((
+        "知识反思",
+        ["知识", "问题", "思考", "反思时间"],
+        knowledge_reflections,
+    ))
+
     return data
 
 
 SHEETS = ["项目总览", "项目步骤", "员工", "工时记录",
-          "任务分配", "能力与资源", "指标数据", "风险预测"]
+          "任务分配", "能力与资源", "指标数据", "风险预测",
+          "知识星体", "知识关联", "知识反思"]
 
 
 def export_all(store, path):

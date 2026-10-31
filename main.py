@@ -32,6 +32,7 @@ import theme
 from chart import BarChart, LoadChart
 from db import ASSIGN_STATUS, PRIORITY, PROJECT_STATUS, Store
 from detail import ImportDialog, ProjectDialog, SubmitWindow
+from knowledge_planet import KnowledgePlanetPage
 from metrics import budget_usage, load_ratio, num, sum_hours
 from server import DEFAULT_PORT, SubmitServer
 from timer_ui import SessionListDialog, TimerBar
@@ -41,7 +42,7 @@ from widgets import (
 )
 
 APP_NAME = "项目记录器"
-APP_SUBTITLE = "项目进度 · 人力 · 风险预测"
+APP_SUBTITLE = "项目进度 · 人力 · 风险预测 · 知识沉淀"
 VERSION = "1.0"
 
 LEVEL_ORDER = ["严重", "风险", "关注", "健康"]
@@ -341,6 +342,10 @@ class MainWindow(QMainWindow):
         act_new.setShortcut("Ctrl+N")
         act_new.triggered.connect(self.new_project)
         file_menu.addAction(act_new)
+        act_knowledge = QAction("记录一条知识", self)
+        act_knowledge.setShortcut("Ctrl+K")
+        act_knowledge.triggered.connect(self.new_knowledge)
+        file_menu.addAction(act_knowledge)
         file_menu.addSeparator()
         act_export = QAction("导出全部数据…", self)
         act_export.setShortcut("Ctrl+E")
@@ -449,12 +454,15 @@ class MainWindow(QMainWindow):
         self.tabs.setObjectName("RootTabs")
         self.dashboard = DashboardPage(self)
         self.tabs.addTab(self.dashboard, "驾驶舱")
+        self.knowledge_page = KnowledgePlanetPage(self)
+        self.tabs.addTab(self.knowledge_page, "知识星球")
         self.assistant_page = AssistantPage(self)
         self.tabs.addTab(self.assistant_page, "小助手")
         self.employee_page = EmployeePage(self)
         self.tabs.addTab(self.employee_page, "员工与工时")
         self.staffing_page = StaffingPage(self)
         self.tabs.addTab(self.staffing_page, "任务分配")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         outer.addWidget(self.tabs, 1)
 
         # ---- 计时条：常驻在选项卡下方 ----
@@ -473,7 +481,8 @@ class MainWindow(QMainWindow):
         self.status_left = label("", "StatusFile")
         self.status_note = label("", "StatusMeta")
         self.status_hint = label(
-            "Ctrl+N 新建    Ctrl+R 刷新    Ctrl+E 导出    F1 说明", "StatusHint"
+            "Ctrl+N 新建    Ctrl+K 知识    Ctrl+R 刷新    Ctrl+E 导出    F1 说明",
+            "StatusHint"
         )
         bottom.addWidget(self.status_left)
         bottom.addWidget(self.status_note)
@@ -484,6 +493,7 @@ class MainWindow(QMainWindow):
     # ---------- 数据操作 ----------
     def refresh_all(self):
         self.dashboard.refresh()
+        self.knowledge_page.refresh()
         self.employee_page.refresh()
         self.staffing_page.refresh()
         # 计时条也要刷：它自己的下拉里有项目和员工，
@@ -518,6 +528,15 @@ class MainWindow(QMainWindow):
         dialog = ProjectDialog(self, None)
         if dialog.exec():
             self.refresh_all()
+
+    def new_knowledge(self):
+        self.tabs.setCurrentWidget(self.knowledge_page)
+        self.knowledge_page.open_add()
+
+    def _on_tab_changed(self, index):
+        """切到知识星球时重算关联，保证别处新增项目后立即能选。"""
+        if self.tabs.widget(index) is self.knowledge_page:
+            self.knowledge_page.refresh()
 
     def export_data(self):
         import export
@@ -559,7 +578,7 @@ class MainWindow(QMainWindow):
     def _restore_hint(self):
         prefix = "提交服务已开启　|　" if self.server.running else ""
         self.status_hint.setText(
-            prefix + "Ctrl+N 新建    Ctrl+R 刷新    Ctrl+E 导出    F1 说明"
+            prefix + "Ctrl+N 新建    Ctrl+K 知识    Ctrl+R 刷新    Ctrl+E 导出    F1 说明"
         )
 
     # ---------- 员工提交 ----------
@@ -785,7 +804,10 @@ class MainWindow(QMainWindow):
         self.resize(1180, 760)
 
     def closeEvent(self, event):
-        # 先关服务再关库：否则服务线程可能正拿着已经关掉的连接写数据
+        # 先停社区网络线程和局域网服务，再关库：
+        # 否则后台线程可能正拿着已经关掉的控件或连接继续工作。
+        if hasattr(self, "knowledge_page"):
+            self.knowledge_page.community_page.shutdown()
         if self.server.running:
             self.server.stop()
         self.store.close()
