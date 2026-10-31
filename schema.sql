@@ -151,3 +151,50 @@ CREATE TABLE IF NOT EXISTS metric (
     note        TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_metric_project ON metric(project_id, metric_date);
+
+
+-- ============================================================ 知识星球
+-- 一条知识不是一篇普通笔记：它有认知区域、显性/隐性、沉淀阶段，
+-- 还可以被反思、被手动连接，也可以靠共同标签自动形成引力关系。
+CREATE TABLE IF NOT EXISTS knowledge (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    title           TEXT    NOT NULL,
+    content         TEXT    NOT NULL DEFAULT '',
+    zone            TEXT    NOT NULL DEFAULT '实际知识',
+    kind            TEXT    NOT NULL DEFAULT '显性知识',
+    source          TEXT    NOT NULL DEFAULT '',
+    tags            TEXT    NOT NULL DEFAULT '',
+    project_id      INTEGER REFERENCES project(id) ON DELETE SET NULL,
+    importance      INTEGER NOT NULL DEFAULT 3,
+    status          TEXT    NOT NULL DEFAULT '已沉淀',
+    next_review     TEXT    NOT NULL DEFAULT '',
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_zone ON knowledge(zone, status);
+CREATE INDEX IF NOT EXISTS idx_knowledge_project ON knowledge(project_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_updated ON knowledge(updated_at);
+
+-- 手动建立的认知关系。标签相同会自动产生「同频」关系，不必重复存。
+CREATE TABLE IF NOT EXISTS knowledge_link (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_id     INTEGER NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+    to_id       INTEGER NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+    relation    TEXT    NOT NULL DEFAULT '关联',
+    note        TEXT    NOT NULL DEFAULT '',
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(from_id, to_id),
+    CHECK(from_id <> to_id)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_link_from ON knowledge_link(from_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_link_to ON knowledge_link(to_id);
+
+-- 每次反思都单独留痕。只存一个「反思次数」看不出认知是怎么变化的。
+CREATE TABLE IF NOT EXISTS knowledge_reflection (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    knowledge_id    INTEGER NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+    prompt          TEXT    NOT NULL DEFAULT '',
+    content         TEXT    NOT NULL DEFAULT '',
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_reflection ON knowledge_reflection(knowledge_id, created_at);

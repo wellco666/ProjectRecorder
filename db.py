@@ -13,7 +13,8 @@ import sys
 import threading
 
 __all__ = ["Store", "DB_DIR", "DB_PATH", "SCHEMA_PATH", "shared_write_lock",
-           "PROJECT_STATUS", "PRIORITY", "STEP_STATUS", "ASSIGN_STATUS"]
+           "PROJECT_STATUS", "PRIORITY", "STEP_STATUS", "ASSIGN_STATUS",
+           "KNOWLEDGE_ZONES", "KNOWLEDGE_KINDS", "KNOWLEDGE_STATUS"]
 
 #: 界面线程和局域网服务线程共用这把锁。
 #: SQLite 同一时刻只允许一个写入者，两边必须串起来，
@@ -47,6 +48,9 @@ PROJECT_STATUS = ["规划中", "进行中", "已暂停", "已交付", "已取消
 PRIORITY = ["高", "中", "低"]
 STEP_STATUS = ["未开始", "进行中", "已完成", "已阻塞"]
 ASSIGN_STATUS = ["待开始", "进行中", "已完成"]
+KNOWLEDGE_ZONES = ["实际知识", "关联知识", "潜在知识", "原始知识"]
+KNOWLEDGE_KINDS = ["显性知识", "隐性知识"]
+KNOWLEDGE_STATUS = ["种子", "探索中", "已沉淀"]
 
 
 class Store:
@@ -650,6 +654,147 @@ class Store:
 
     def delete_metric(self, metric_id):
         self.execute("DELETE FROM metric WHERE id = ?", (metric_id,))
+
+    # ------------------------------------------------------------ 知识星球
+    def knowledge_items(self, zone="", keyword="", status=""):
+        """知识星体列表。标签、正文、来源都参与搜索。"""
+        sql = (
+            "SELECT k.*, p.name AS project_name FROM knowledge k "
+            "LEFT JOIN project p ON p.id = k.project_id"
+        )
+        where, params = [], []
+        if zone:
+            where.append("k.zone = ?")
+            params.append(zone)
+        if status:
+            where.append("k.status = ?")
+            params.append(status)
+        if keyword:
+            like = f"%{keyword}%"
+            where.append("(k.title LIKE ? OR k.content LIKE ? OR k.tags LIKE ? "
+                         "OR k.source LIKE ? OR p.name LIKE ?)")
+            params.extend([like] * 5)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += (" ORDER BY CASE k.status WHEN '种子' THEN 0 "
+                "WHEN '探索中' THEN 1 ELSE 2 END, "
+                "k.importance DESC, k.updated_at DESC, k.id DESC")
+        return self.query(sql, params)
+
+    def knowledge_item(self, knowledge_id):
+        return self.one(
+            "SELECT k.*, p.name AS project_name FROM knowledge k "
+            "LEFT JOIN project p ON p.id = k.project_id WHERE k.id = ?",
+            (knowledge_id,),
+        )
+
+    def add_knowledge(self, data):
+        fields = ("title", "content", "zone", "kind", "source", "tags",
+                  "project_id", "importance", "status", "next_review")
+        values = [data.get(f, "") for f in fields]
+        values[2] = values[2] or "实际知识"
+        values[3] = values[3] or "显性知识"
+        values[6] = values[6] or None
+        values[7] = max(1, min(5, int(values[7] or 3)))
+        values[8] = values[8] or "已沉淀"
+        cursor = self.execute(
+            "INSERT INTO knowledge (" + ",".join(fields) + ") VALUES ("
+            + ",".join("?" * len(fields)) + ")",
+            values,
+        )
+        return cursor.lastrowid
+
+    def update_knowledge(self, knowledge_id, data):
+        allowed = ("title", "content", "zone", "kind", "source", "tags",
+                   "project_id", "importance", "status", "next_review")
+        pairs = [(f, data[f]) for f in allowed if f in data]
+        if not pairs:
+            return
+        if "importance" in data or "project_id" in data:
+            data = dict(data)
+            if "importance" in data:
+                data["importance"] = max(1, min(5, int(data["importance"] or 3)))
+            if "project_id" in data:
+                data["project_id"] = data["project_id"] or None
+            pairs = [(f, data[f]) for f in allowed if f in data]
+        sql = ("UPDATE knowledge SET "
+               + ", ".join(f"{f} = ?" for f, _ in pairs)
+               + ", updated_at = datetime('now','localtime') WHERE id = ?")
+        self.execute(sql, [v for _, v in pairs] + [knowledge_id])
+
+    def delete_knowledge(self, knowledge_id):
+        self.execute("DELETE FROM knowledge WHERE id = ?", (knowledge_id,))
+
+    def knowledge_links(self):
+        return self.query(
+            """SELECT l.*, a.title AS from_title, b.title AS to_title
+               FROM knowledge_link l
+               JOIN knowledge a ON a.id = l.from_id
+               JOIN knowledge b ON b.id = l.to_id
+               ORDER BY l.created_at DESC, l.id DESC"""
+        )
+
+    def add_knowledge_link(self, from_id, to_id, relation="关联", note=""):
+        if from_id is None or to_id is None or from_id == to_id:
+            return None
+        cursor = self.execute(
+            """INSERT OR IGNORE INTO knowledge_link
+               (from_id, to_id, relation, note) VALUES (?,?,?,?)""",
+            (from_id, to_id, relation or "关联", note or ""),
+        )
+        return cursor.lastrowid
+
+    def delete_knowledge_link(self, link_id):
+        self.execute("DELETE FROM knowledge_link WHERE id = ?", (link_id,))
+
+    def knowledge_reflections(self, knowledge_id):
+        return self.query(
+            """SELECT * FROM knowledge_reflection
+               WHERE knowledge_id = ? ORDER BY created_at DESC, id DESC""",
+            (knowledge_id,),
+        )
+
+    def add_knowledge_reflection(self, knowledge_id, prompt, content):
+        cursor = self.execute(
+            """INSERT INTO knowledge_reflection
+               (knowledge_id, prompt, content) VALUES (?,?,?)""",
+            (knowledge_id, prompt or "", content or ""),
+        )
+        self.execute(
+            "UPDATE knowledge SET updated_at = datetime('now','localtime') "
+            "WHERE id = ?", (knowledge_id,),
+        )
+        return cursor.lastrowid
+
+    def knowledge_stats(self):
+        rows = self.query(
+            "SELECT zone, kind, status, COUNT(*) AS n FROM knowledge "
+            "GROUP BY zone, kind, status"
+        )
+        result = {
+            "total": 0, "explicit": 0, "tacit": 0,
+            "seed": 0, "exploring": 0, "settled": 0,
+            "zones": {zone: 0 for zone in KNOWLEDGE_ZONES},
+            "reflections": int(self.scalar(
+                "SELECT COUNT(*) FROM knowledge_reflection", (), 0)),
+            "links": int(self.scalar(
+                "SELECT COUNT(*) FROM knowledge_link", (), 0)),
+        }
+        for row in rows:
+            n = int(row["n"] or 0)
+            result["total"] += n
+            result["zones"][row["zone"]] = result["zones"].get(row["zone"], 0) + n
+            if row["kind"] == "隐性知识":
+                result["tacit"] += n
+            else:
+                result["explicit"] += n
+            if row["status"] == "种子":
+                result["seed"] += n
+            elif row["status"] == "探索中":
+                result["exploring"] += n
+            else:
+                result["settled"] += n
+        return result
 
     # ------------------------------------------------------------ 汇总
     def dashboard_rows(self):
