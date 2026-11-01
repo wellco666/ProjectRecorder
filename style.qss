@@ -104,6 +104,20 @@ QPushButton#PrimaryButton:pressed {
     background-color: $accent_deep;
 }
 
+QPushButton#AccountButton {
+    background-color: $accent_wash;
+    color: $accent_dim;
+    border: 1px solid $accent_edge;
+    border-radius: 8px;
+    padding: 7px 13px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#AccountButton:hover {
+    background-color: $hover;
+    color: $fg_strong;
+}
+
 QPushButton#GhostButton {
     background-color: transparent;
     color: $fg_soft;

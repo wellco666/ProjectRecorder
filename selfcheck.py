@@ -98,11 +98,18 @@ def main():
     if window is None:
         print("\n主窗口构造失败——上面那个 traceback 就是原因。")
         return 1
+    step("手机版账号入口", lambda: (
+        window.account_button.text() or "未登录"
+    ))
+    step("应用图标可加载", lambda: (
+        len(window.windowIcon().availableSizes()) or
+        (_ for _ in ()).throw(AssertionError("窗口图标为空"))
+    ))
 
     # ---- 4. 各页面 ----
     print("\n[4] 页面")
-    for name in ("dashboard", "knowledge_page", "assistant_page",
-                 "employee_page", "staffing_page", "timer_bar"):
+    for name in ("dashboard", "knowledge_page", "collaboration_page", "employee_cloud_page",
+                 "assistant_page", "employee_page", "staffing_page", "timer_bar"):
         widget = getattr(window, name, None)
         if widget is None:
             print(f"  [缺失] {name} —— 主窗口上没有这个属性")

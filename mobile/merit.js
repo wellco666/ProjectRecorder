@@ -51,6 +51,19 @@ function meritBalance(profileId) {
     .reduce((sum, row) => sum + num(row.amount), 0);
 }
 
+/* Frozen points are pending reward requests. They still belong to the
+ * employee but cannot be spent a second time. */
+function meritReserved(profileId) {
+  const id = String(profileId || "");
+  return (DB.redemptions || [])
+    .filter(row => String(row.profile_id) === id && row.status === "pending")
+    .reduce((sum, row) => sum + num(row.cost), 0);
+}
+
+function meritAvailable(profileId) {
+  return meritBalance(profileId) - meritReserved(profileId);
+}
+
 /* 所有人的余额，老板视角用。返回 { profileId: balance } */
 function meritBalances() {
   const map = {};
@@ -281,7 +294,8 @@ function renderMeritCard() {
   const unit = $("merit-unit");
   if (unit) unit.textContent = MERIT.unit;
 
-  const balance = meritBalance(profile.id);
+  const balance = meritAvailable(profile.id);
+  const reserved = meritReserved(profile.id);
   const balanceBox = $("merit-balance");
   if (balanceBox) {
     balanceBox.textContent = meritNumber(balance);
@@ -292,7 +306,8 @@ function renderMeritCard() {
   const earned = meritEarnedSince(profile.id);
   const monthBox = $("merit-month");
   if (monthBox) {
-    monthBox.textContent = earned > 0 ? "本月 +" + meritNumber(earned) : "";
+    monthBox.textContent = (earned > 0 ? "本月 +" + meritNumber(earned) : "")
+      + (reserved > 0 ? " · 冻结 " + meritNumber(reserved) : "");
   }
 
   /* 等级：用累计赚到的算，花掉的不会降级 */

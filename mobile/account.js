@@ -580,13 +580,16 @@ async function toggleWork() {
       const result = await stopWork();
       const hours = result ? num(result.hours) : 0;
       const merit = result ? num(result.merit) : 0;
+      const pending = result ? num(result.pending_merit) : 0;
       /* 三种情况都要说清楚，不能只弹一个"已结束" ——
          那样用户不知道到底记没记上。 */
       const capped = !!(result && result.capped);
       if (hours <= 0) {
         toast("已结束 · 不到 20 秒，这次没记");
       } else if (capped) {
-        toast("已结束 · 这次太长了，按 24 小时算 · +" + merit + " " + MERIT.unit);
+        toast("已结束 · 这次太长了，按 24 小时算 · 待结算 " + pending + " " + MERIT.unit);
+      } else if (pending > 0) {
+        toast("已结束 · 记了 " + hours + " 小时 · 待评级结算 " + pending + " " + MERIT.unit);
       } else if (merit > 0) {
         toast("已结束 · 记了 " + hours + " 小时 · +" + merit + " " + MERIT.unit);
       } else {
@@ -610,7 +613,7 @@ async function toggleWork() {
 function openShopSheet() {
   if (!DB.profile) { toast("先登录"); return; }
   const me = DB.profile.id;
-  const balance = meritBalance(me);
+  const balance = meritAvailable(me);
   const rewards = (DB.rewards || []).filter(item => item.active !== false);
 
   const rows = rewards.map(item => {
