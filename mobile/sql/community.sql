@@ -1,0 +1,140 @@
+-- ============================================================
+-- Knowledge Planet community feed
+--
+-- Run this once in Supabase -> SQL Editor.
+-- ASCII-only on purpose, matching the other mobile/sql files.
+--
+-- Every authenticated account can read every post and publish
+-- a post. Identity fields are written by a SECURITY DEFINER
+-- function from profiles, so the client cannot spoof a name.
+-- ============================================================
+
+create table if not exists public.community_posts (
+  id uuid primary key default gen_random_uuid(),
+  author_id uuid not null references public.profiles(id) on delete cascade,
+  author_name text not null default '',
+  author_role text not null default 'employee',
+  topic text not null default 'share',
+  content text not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_community_posts_created
+  on public.community_posts(created_at desc);
+create index if not exists idx_community_posts_author
+  on public.community_posts(author_id, created_at desc);
+
+alter table public.community_posts enable row level security;
+
+-- All signed-in members share one planet.
+drop policy if exists "community posts readable by members"
+  on public.community_posts;
+create policy "community posts readable by members"
+  on public.community_posts for select to authenticated
+  using (true);
+
+-- Direct writes are not allowed. Use the RPC below so author
+-- fields come from the account profile rather than the client.
+revoke insert, update, delete on public.community_posts from anon, authenticated;
+revoke select on public.community_posts from anon;
+grant select on public.community_posts to authenticated;
+
+
+create or replace function public.post_community_message(
+  p_content text,
+  p_topic text default 'share'
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth, pg_temp
+as $post_community$
+declare
+  v_uid uuid := auth.uid();
+  v_name text;
+  v_role text;
+  v_topic text := lower(trim(coalesce(p_topic, 'share')));
+  v_content text := trim(coalesce(p_content, ''));
+  v_id uuid;
+begin
+  if v_uid is null then
+    raise exception 'not signed in';
+  end if;
+
+  select name, role into v_name, v_role
+    from public.profiles
+   where id = v_uid and coalesce(active, true) = true;
+
+  if v_name is null then
+    raise exception 'profile not found';
+  end if;
+
+  if char_length(v_content) < 1 then
+    raise exception 'message is empty';
+  end if;
+  if char_length(v_content) > 2000 then
+    raise exception 'message is too long';
+  end if;
+  if char_length(v_topic) < 1 or char_length(v_topic) > 24 then
+    v_topic := 'share';
+  end if;
+
+  insert into public.community_posts
+    (author_id, author_name, author_role, topic, content)
+  values
+    (v_uid, v_name, coalesce(v_role, 'employee'), v_topic, v_content)
+  returning id into v_id;
+
+  return jsonb_build_object('ok', true, 'id', v_id);
+end;
+$post_community$;
+
+revoke all on function public.post_community_message(text, text) from public;
+grant execute on function public.post_community_message(text, text)
+  to authenticated;
+
+
+create or replace function public.delete_my_community_message(p_post_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, auth, pg_temp
+as $delete_community$
+declare
+  v_uid uuid := auth.uid();
+  v_deleted integer;
+begin
+  if v_uid is null then
+    raise exception 'not signed in';
+  end if;
+
+  delete from public.community_posts
+   where id = p_post_id and author_id = v_uid;
+
+  get diagnostics v_deleted = row_count;
+  return v_deleted > 0;
+end;
+$delete_community$;
+
+revoke all on function public.delete_my_community_message(uuid) from public;
+grant execute on function public.delete_my_community_message(uuid)
+  to authenticated;
+
+
+-- Realtime is optional. The clients also poll every few seconds,
+-- so posting still works if the publication is not configured.
+do $realtime$
+begin
+  if exists (
+    select 1 from pg_publication where pubname = 'supabase_realtime'
+  ) and not exists (
+    select 1
+      from pg_publication_tables
+     where pubname = 'supabase_realtime'
+       and schemaname = 'public'
+       and tablename = 'community_posts'
+  ) then
+    alter publication supabase_realtime add table public.community_posts;
+  end if;
+end;
+$realtime$;

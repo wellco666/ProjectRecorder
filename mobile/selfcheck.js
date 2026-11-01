@@ -26,8 +26,8 @@ const HERE = __dirname;
    **必须和 index.html 里 <script src> 的顺序一致**——
    漏掉一个的话，那个文件有语法错也查不出来，
    而语法错在浏览器里表现为"整页空白"，最难查。 */
-const FILES = ["store.js", "calc.js", "charts.js", "assist.js",
-               "sync.js", "notify.js", "account.js", "app.js"];
+const FILES = ["store.js", "calc.js", "charts.js", "merit.js", "assist.js",
+               "sync.js", "notify.js", "account.js", "community.js", "app.js"];
 
 let failed = 0;
 function fail(label, detail) {
@@ -164,8 +164,8 @@ function matchAll(text, pattern, group) {
 
      改成 vm.Script 预编译后，每个用例只付"执行"的代价。
 */
-const COMPILED = ["store.js", "calc.js", "assist.js", "charts.js", "sync.js",
-                  "notify.js"]
+const COMPILED = ["store.js", "calc.js", "assist.js", "charts.js", "merit.js",
+                  "sync.js", "notify.js"]
   .map(name => ({
   name,
   script: new vm.Script(fs.readFileSync(path.join(HERE, name), "utf8"),
@@ -2480,7 +2480,7 @@ test("提示里提到的 SQL 文件必须真实存在", () => {
 
      **改动文件名时全局搜一遍引用**这件事，人很容易忘。
      所以让机器盯着：界面上出现的 sql/xxx.sql 必须真的存在。 */
-  const files = ["sync.js", "notify.js", "account.js", "app.js"];
+  const files = ["sync.js", "notify.js", "account.js", "community.js", "app.js"];
   const missing = [];
   const seen = [];
   files.forEach(name => {
@@ -2575,7 +2575,7 @@ test("index.html 里的每个按钮都有 onclick 绑上", () => {
 
      只检查 index.html 里**静态写死**的按钮。 */
   const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
-  const sources = ["app.js", "account.js"]
+  const sources = ["app.js", "account.js", "community.js"]
     .map(name => fs.readFileSync(path.join(HERE, name), "utf8"))
     .join("\n");
 
@@ -2818,7 +2818,7 @@ test("进「我的」页会清掉红点", () => {
   if (!/min-width:\s*1[5-9]px|min-width:\s*2\dpx/.test(rule)) {
     throw new Error("红点最小宽度太小，两位数会挤在一起");
   }
-  if (!/font-weight:\s*[56]00/.test(rule)) {
+  if (!/font-weight:\s*[5-7]00/.test(rule)) {
     throw new Error("红点数字没有加粗，小尺寸下看不清");
   }
   if (rule.indexOf("box-shadow") === -1) {
@@ -3216,7 +3216,7 @@ test("JS 里切换的选中态 class，CSS 里必须有对应样式", () => {
 
   /* 反向检查：chip 上用 " on" 拼接的地方，必须能被上面的规则覆盖 */
   const chipOnUsers = [];
-  ["notify.js", "account.js", "app.js"].forEach(file => {
+  ["notify.js", "account.js", "community.js", "app.js"].forEach(file => {
     const src = fs.readFileSync(path.join(HERE, file), "utf8");
     if (/class="chip[^"]*\$\{[^}]*\? " on" : ""\}/.test(src)) {
       chipOnUsers.push(file);
@@ -3489,7 +3489,7 @@ test("界面上绑定的每个处理函数都真的有定义", () => {
      所以这里做一条真正的静态检查：凡是 `onclick = 某个名字` 的，
      那个名字必须在某个文件里被定义过。 */
   const FILES = ["app.js", "account.js", "sync.js", "notify.js",
-    "assist.js", "charts.js", "store.js"];
+    "assist.js", "charts.js", "store.js", "community.js"];
 
   const defined = new Set();
   FILES.forEach(file => {
@@ -3746,6 +3746,410 @@ test("邮箱拼写检查不能误伤真实域名", () => {
   }
 });
 
+test("记忆源点：余额是流水求和，不是单独存的数", () => {
+  /* 这是整个系统的算术地基。
+     余额一旦单独存一份，就会和流水对不上，而且**查不出哪一步错的**。
+     所以这里直接跑真代码，不是看文本。 */
+  fresh();
+  run(`
+    DB.meritLedger = [
+      { id: "a", profile_id: "p1", amount: 120, kind: "grade",
+        reason: "任务「官网」S 级", created_at: "2026-11-01T10:00:00Z" },
+      { id: "b", profile_id: "p1", amount: -50, kind: "redeem",
+        reason: "兑换 下午茶", created_at: "2026-11-01T11:00:00Z" },
+      { id: "c", profile_id: "p2", amount: 999, kind: "adjust",
+        reason: "别人的", created_at: "2026-11-01T12:00:00Z" }
+    ];
+  `);
+
+  const p1 = run('meritBalance("p1")');
+  if (p1 !== 70) throw new Error("p1 余额应为 70（120-50），实际 " + p1);
+
+  const p2 = run('meritBalance("p2")');
+  if (p2 !== 999) throw new Error("p2 的流水不该串到 p1，实际 " + p2);
+
+  /* 没有流水的人必须是 0，不能是 NaN */
+  const nobody = run('meritBalance("p3")');
+  if (nobody !== 0) throw new Error("没记录的人应该是 0，实际 " + nobody);
+
+  /* 最新的排在前面 */
+  const first = run('meritEntries("p1")[0].id');
+  if (first !== "b") throw new Error("流水应按时间倒序，第一条应是 b，实际 " + first);
+
+  /* 显示格式：千分位 + 正负号 */
+  const big = run('meritNumber(1280)');
+  if (big !== "1,280") throw new Error("千分位不对：" + big);
+  if (run('meritSigned(120)') !== "+120") throw new Error("正数要带 +");
+  if (run('meritSigned(-50)') !== "-50") throw new Error("负数要带 -");
+});
+
+test("记忆源点：名字只有一个来源，余额由流水算出来", () => {
+  /* 第 1 步先钉三条规矩：
+
+     1. 名字只能是常量。这个名字已经改过一次
+        （功绩点 → 记忆源点），硬编码在界面里的字会残留，
+        变成"一半新名一半旧名"。
+
+     2. **余额不能存。** 只存流水，余额永远求和。
+        两个都存就会出现余额和流水对不上，而且查不出哪一步错了。
+
+     3. 汇率和评级倍率必须写在代码里，不能散落各处。 */
+  const merit = fs.readFileSync(path.join(HERE, "merit.js"), "utf8");
+
+  if (merit.indexOf('name: "记忆源点"') === -1) {
+    throw new Error("merit.js 里的名字不是「记忆源点」");
+  }
+  if (merit.indexOf("hourRate: 10") === -1) {
+    throw new Error("汇率（1 小时 = 10 源点）没写进常量");
+  }
+  ["S: 1.2", "A: 1.0", "B: 0.8", "C: 0"].forEach(pair => {
+    if (merit.indexOf(pair) === -1) {
+      throw new Error("评级倍率缺：" + pair);
+    }
+  });
+  /* 余额必须是算出来的 */
+  if (!/function meritBalance[\s\S]{0,200}reduce/.test(merit)) {
+    throw new Error("meritBalance 不是用流水求和 —— 余额不许单独存");
+  }
+
+  /* 界面上不许出现旧名字 */
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  if (/功绩点/.test(html)) {
+    throw new Error("index.html 里还有旧名字「功绩点」");
+  }
+
+  /* 建表脚本必须是纯 ASCII，这是这个项目的硬规矩 */
+  const sql = fs.readFileSync(path.join(HERE, "sql", "merit-ledger.sql"));
+  const bad = [...sql].filter(b => b > 127).length;
+  if (bad > 0) {
+    throw new Error("merit-ledger.sql 有 " + bad + " 个非 ASCII 字节");
+  }
+});
+
+test("等级用累计赚到的算，花掉的不会降级", () => {
+  /* 如果用余额算，员工一兑换就掉段 —— 越兑换越不想干，
+     正好把激励做反了。所以等级看的是"总共赚过多少"。 */
+  fresh();
+  run(`
+    DB.meritLedger = [
+      { id: "a", profile_id: "p", amount: 120, created_at: "2026-11-01T10:00:00Z" },
+      { id: "b", profile_id: "p", amount: -100, created_at: "2026-11-01T11:00:00Z" }
+    ];
+  `);
+
+  const balance = run('meritBalance("p")');
+  if (balance !== 20) throw new Error("余额应为 20，实际 " + balance);
+
+  const lifetime = run('meritLifetime("p")');
+  if (lifetime !== 120) throw new Error("累计应为 120（只算正数），实际 " + lifetime);
+
+  const level = run('meritLevel("p")');
+  if (level.current.name !== "白银") {
+    throw new Error("累计 120 应该是白银，实际 " + level.current.name);
+  }
+  if (level.next.name !== "黄金" || level.toNext !== 180) {
+    throw new Error("离黄金还差 180，实际 " + level.toNext);
+  }
+
+  /* 最高级之后没有下一级，不能算出负数 */
+  run('DB.meritLedger = [{ id: "c", profile_id: "q", amount: 5000, created_at: "2026-11-01T10:00:00Z" }];');
+  const top = run('meritLevel("q")');
+  if (top.current.name !== "钻石" || top.next !== null || top.toNext !== 0) {
+    throw new Error("5000 分应该是钻石且没有下一级");
+  }
+});
+
+test("新功能：上工、商城、请假、看板都接好了", () => {
+  /* 这几块是照着需求文档新加的，任何一处断开都会变成
+     "按钮点了没反应"——那种问题在真机上很难查。 */
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
+  const account = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
+  const css = fs.readFileSync(path.join(HERE, "style.css"), "utf8");
+
+  /* 1. 元素都在 */
+  ["work-card", "btn-work", "merit-level", "btn-shop",
+    "team-card", "team-summary", "team-todo", "team-board",
+    "btn-me-leave", "btn-me-rewards"].forEach(id => {
+    if (html.indexOf('id="' + id + '"') === -1) {
+      throw new Error("index.html 里缺元素 #" + id);
+    }
+  });
+
+  /* 2. 按钮都绑了处理函数 */
+  const useless = [];
+  [
+    ["btn-work", "toggleWork", app],
+    ["btn-shop", "openShopSheet", app],
+    ["btn-me-leave", "openLeaveSheet", app],
+    ["btn-me-rewards", "openManageRewards", app],
+  ].forEach(([id, fn, source]) => {
+    if (source.indexOf('$("' + id + '").onclick = ' + fn) === -1) {
+      useless.push(id + " → " + fn);
+    }
+  });
+  if (useless.length) {
+    throw new Error("这些按钮没绑定：" + useless.join("、"));
+  }
+
+  /* 3. 四个新函数真的定义了 */
+  ["toggleWork", "openShopSheet", "openLeaveSheet",
+    "openManageRewards", "renderWorkCard", "stopWorkTicker"].forEach(fn => {
+    if (account.indexOf("function " + fn) === -1) {
+      throw new Error("account.js 里没有 " + fn);
+    }
+  });
+  if (app.indexOf("function renderTeamCard") === -1) {
+    throw new Error("app.js 里没有 renderTeamCard");
+  }
+
+  /* 4. 计时器必须在离开页面时停掉，否则白耗电 */
+  if (!/target !== "tasks"[\s\S]{0,120}stopWorkTicker/.test(app)) {
+    throw new Error("离开任务页没有停掉走秒定时器");
+  }
+
+  /* 5. 汇率只有一个来源：merit.js 的 10，SQL 里也必须是 10 */
+  const sql = fs.readFileSync(
+    path.join(HERE, "sql", "work-session.sql"), "utf8");
+  if (sql.indexOf("round(v_hours * 10)") === -1) {
+    throw new Error("work-session.sql 里的汇率不是 10 — 和 merit.js 对不上");
+  }
+
+  /* 6. 新组件的样式得有 */
+  ["work-timer", "shop-item", "grade-option", "todo-row"].forEach(name => {
+    if (css.indexOf("." + name) === -1) {
+      throw new Error("style.css 缺 ." + name);
+    }
+  });
+});
+
+test("样式表不能漏掉表单控件（下拉框曾经完全没样式）", () => {
+  /* **重写样式表时漏了 <select>。**
+
+     结果派任务页、记工时、习惯、项目编辑里的下拉框全是浏览器
+     原生样式：又小又窄、带一圈灰硬边，和旁边的输入框完全不像
+     一套东西。截图一眼就能看出来。
+
+     这里把"必须被样式化的控件"列出来，漏一个就报错。 */
+  const css = fs.readFileSync(path.join(HERE, "style.css"), "utf8");
+
+  const mustStyle = [
+    ["select", "下拉框"],
+    ["input", "输入框"],
+    ["textarea", "多行输入"],
+    [".btn", "按钮"],
+    [".chip", "小选项"],
+  ];
+  const missing = mustStyle
+    .filter(([selector]) => css.indexOf("\n" + selector + " {") === -1
+      && css.indexOf("\n" + selector + ",") === -1)
+    .map(([, label]) => label);
+  if (missing.length) {
+    throw new Error("这些控件没有样式：" + missing.join("、"));
+  }
+
+  /* 下拉框必须去掉系统箭头，否则和自定义样式打架 */
+  if (css.indexOf("appearance: none") === -1) {
+    throw new Error("select 没有去掉系统默认外观");
+  }
+
+  /* 派任务页的员工下拉必须有"请选择"占位 ——
+     否则 value 清空时 selectedIndex 变成 -1，看上去是空白的。 */
+  const account = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
+  if (account.indexOf("请选择员工") === -1) {
+    throw new Error("派任务页的员工下拉没有占位项，清空后是空白");
+  }
+});
+
+test("底部导航不能压住页面内容", () => {
+  /* 导航是 position:fixed 的，浮在所有页面上面。
+     每个页面的 .body 都必须留出导航的高度，否则列表最后几条
+     会被挡住 —— 助手页的输入框就是这么"消失"的。 */
+  const css = fs.readFileSync(path.join(HERE, "style.css"), "utf8");
+
+  /* 通用的底部留白必须作用于所有页面，而不是只有 .has-nav 的 */
+  if (css.indexOf(".page .body {") === -1) {
+    throw new Error("没有给所有页面统一留底部空间");
+  }
+  if (!/\.page \.body \{[\s\S]{0,120}var\(--nav-h\)/.test(css)) {
+    throw new Error("底部留白没有用 --nav-h");
+  }
+  /* 助手页是 flex 三段式，自己也要留 */
+  if (!/#page-assist \.body \{[\s\S]{0,200}var\(--nav-h\)/.test(css)) {
+    throw new Error("助手页的 body 没留导航高度 —— 输入框会被盖住");
+  }
+});
+
+test("源点流水不能重复记账，时间要按本地时区", () => {
+  /* **这条是拿真机数据查出来的。**
+
+     收工时客户端先在本地插一条 cash 流水（id 是 local-hours-xxx），
+     服务端也写一条（id 是随机 uuid）。两边 id 不同 → 下一轮同步
+     两条并存 → **同一次工作算了两遍钱**，余额直接翻倍。
+
+     浏览器里看到的是：同一笔 +20 出现两次，时间一个 14:53
+     一个 06:53（UTC 没转本地）。
+
+     现在：客户端不插流水，服务端写完立刻拉一次。 */
+  const sync = fs.readFileSync(path.join(HERE, "sync.js"), "utf8");
+
+  if (/id:\s*"local-hours-/.test(sync)) {
+    throw new Error("stopWork 还在本地插流水 —— 会和服务端那条重复");
+  }
+  if (/id:\s*"local-grade-/.test(sync)) {
+    throw new Error("gradeTask 还在本地插流水 —— 会重复记账");
+  }
+  /* 两个 RPC 之后都要拉一次，否则界面要等 30 秒才更新 */
+  const pulls = (sync.match(/await pullAll\(\)/g) || []).length;
+  if (pulls < 2) {
+    throw new Error("打完分 / 收完工没有立刻拉取，界面会滞后");
+  }
+
+  /* 时间必须走 Date 转本地，不能直接 slice */
+  const merit = fs.readFileSync(path.join(HERE, "merit.js"), "utf8");
+  if (!/function meritDayKey/.test(merit)) {
+    throw new Error("没有 meritDayKey —— 日期比较会把 UTC 当本地");
+  }
+  if (/return text\.slice\(5, 10\)/.test(merit)) {
+    throw new Error("meritTime 还在直接 slice 字符串，显示的是 UTC");
+  }
+
+  /* 历史遗留的本地流水要被清掉 */
+  const store = fs.readFileSync(path.join(HERE, "store.js"), "utf8");
+  if (store.indexOf('indexOf("local-") !== 0') === -1) {
+    throw new Error("没有清理历史遗留的 local- 流水，余额会一直是错的");
+  }
+});
+
+test("工时必须有上限（一次收工最多算一天）", () => {
+  /* **这条也是"钱"的问题。**
+
+     原来 end_work 算的是 (now - started_at)，**没有上限**。
+     忘了收工、或者断网收不了工，隔三天再点结束：
+
+         72 小时 → 720 源点
+
+     一次就能刷出几百点，整个经济系统就废了。
+
+     现在：单次封顶 24 小时；而且 start_work 遇到超过 24 小时的
+     陈旧会话会把它关掉再开新的 —— 否则用户点开工永远是
+     "already working"，人被锁死在门外。 */
+  const sql = fs.readFileSync(
+    path.join(HERE, "sql", "work-session-cap.sql"), "utf8");
+
+  if (!/if v_hours > 24 then/.test(sql)) {
+    throw new Error("end_work 没有把时长封顶到 24 小时");
+  }
+  if (sql.indexOf("'capped'") === -1) {
+    throw new Error("end_work 没告诉客户端被截断了，用户会莫名其妙少算");
+  }
+  /* 陈旧会话要能自救 */
+  if (!/v_hours <= 24 then[\s\S]{0,120}already working/.test(sql)) {
+    throw new Error("start_work 没区分陈旧会话和正在工作中");
+  }
+  if (sql.indexOf("'closed_stale'") === -1) {
+    throw new Error("start_work 没有自动关闭陈旧会话");
+  }
+
+  /* 客户端要把这件事说出来 */
+  const account = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
+  if (account.indexOf("是不是忘了收工") === -1) {
+    throw new Error("跨天未收工没有提示");
+  }
+  if (account.indexOf("按 24 小时算") === -1) {
+    throw new Error("被截断时没有告诉用户");
+  }
+
+  /* 纯 ASCII 规矩 */
+  const bad = [...fs.readFileSync(
+    path.join(HERE, "sql", "work-session-cap.sql"))].filter(b => b > 127).length;
+  if (bad > 0) {
+    throw new Error("work-session-cap.sql 有 " + bad + " 个非 ASCII 字节");
+  }
+});
+
+test("推送设备登记：换过账号的机器不能卡在 RLS 上", () => {
+  /* **真机上踩到的：**
+
+     「后台推送没登记上：写库失败：new row violates row-level security
+       policy (USING expression) for table "push_devices"」
+
+     原因：客户端直接 upsert + onConflict "cid"。cid 是唯一键，而
+     这台手机换过账号 —— 那一行还挂在**上一个账号**名下。upsert 于是
+     走 UPDATE 分支，可 RLS 只允许改自己的行，必然报错。
+
+     结果：这台机器永远登记不上，推送发到旧地址，手机一声不响。
+
+     现在改成调 register_push_device：它会把这条 CID 收回来
+     （删旧插新），一台设备同时只属于一个人。 */
+  const sqlPath = path.join(HERE, "sql", "push-device-rpc.sql");
+  if (!fs.existsSync(sqlPath)) {
+    throw new Error("没有 sql/push-device-rpc.sql");
+  }
+  const sql = fs.readFileSync(sqlPath, "utf8");
+
+  if (!/create or replace function public\.register_push_device/.test(sql)) {
+    throw new Error("没有 register_push_device 函数");
+  }
+  if (!/delete from public\.push_devices where cid = v_cid/.test(sql)) {
+    throw new Error("函数没有先删掉旧记录 —— 换账号还是会撞 RLS");
+  }
+
+  const notify = fs.readFileSync(path.join(HERE, "notify.js"), "utf8");
+  /* 先把注释剥掉再查 —— 注释里会提到旧写法
+     （"原来这里是 upsert(..., onConflict: cid)"），
+     不剥的话自检会误判成"还在用旧写法"。 */
+  const code = notify
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+
+  if (/onConflict:\s*"cid"/.test(code)) {
+    throw new Error("还在直接 upsert push_devices —— 换过账号的机器会登记失败");
+  }
+  if (code.indexOf('rpc("register_push_device"') === -1) {
+    throw new Error("没有走 register_push_device");
+  }
+});
+
+test("验收按计时器量出来的实际时长算钱，预估只作参考", () => {
+  /* 用户要求："以计时器的时间为准，老板设置的只作为参考。"
+
+     原来 grade_task 用的是 est_hours —— 老板填的预估。
+     实际做了 4 小时、预估写了 2 小时，就只发 20 分，
+     干得多拿得少，激励整个是反的。
+
+     现在：从 task_logs 的 started_at → finished_at 算实际时长。
+     没有计时记录（老任务）才回退到预估。 */
+  const sql = fs.readFileSync(
+    path.join(HERE, "sql", "task-grade-actual.sql"), "utf8");
+
+  if (sql.indexOf("from public.task_logs") === -1) {
+    throw new Error("grade_task 没有读任务的实际计时记录");
+  }
+  if (!/'source'/.test(sql)) {
+    throw new Error("没有返回 source —— 界面分不清是按实际还是按预估算的");
+  }
+  /* 封顶仍然要在 */
+  if (!/least\(greatest\(v_hours, 0\), 24\)/.test(sql)) {
+    throw new Error("实际时长没有夹到 0~24 小时");
+  }
+
+  /* 客户端预览要和服务端口径一致，否则老板看到的数字和实际发的不一样 */
+  const merit = fs.readFileSync(path.join(HERE, "merit.js"), "utf8");
+  if (merit.indexOf("function taskActualHours") === -1) {
+    throw new Error("客户端没有 taskActualHours —— 预览会用预估算");
+  }
+  if (!/function taskBaseMerit[\s\S]{0,320}taskActualHours/.test(merit)) {
+    throw new Error("taskBaseMerit 没有优先用实际时长");
+  }
+
+  /* 接受了就自动开始计时 */
+  const account = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
+  if (!/setTaskAccept\(id, true[\s\S]{0,260}startTask\(id\)/.test(account)) {
+    throw new Error("接受任务后没有自动开始计时");
+  }
+});
+
 test("记住账号：登录成功才存、能删、注销时清掉", () => {
   /* 需求：登录过的账号，在登录页点一下就进去。
 
@@ -3813,14 +4217,23 @@ test("接受/延期：客户端调的 RPC 在 SQL 里都有", () => {
      "Could not find the function"，而不是编译错误。
 
      所以把两边读出来直接比对，写代码时就挡住。 */
-  const sqlPath = path.join(HERE, "sql", "task-accept-extension.sql");
-  const syncPath = path.join(HERE, "sync.js");
-  if (!fs.existsSync(sqlPath)) {
-    throw new Error("sql/task-accept-extension.sql 不见了");
-  }
+  /* 每新增一个带 task RPC 的 sql 文件，都要登记到这里。 */
+  const sqlFiles = [
+    "task-accept-extension.sql",
+    "task-grade.sql",
+    "work-session.sql",
+    "rewards-leave.sql",
+  ];
+  sqlFiles.forEach(name => {
+    if (!fs.existsSync(path.join(HERE, "sql", name))) {
+      throw new Error("sql/" + name + " 不见了");
+    }
+  });
 
-  const sql = fs.readFileSync(sqlPath, "utf8");
-  const sync = fs.readFileSync(syncPath, "utf8");
+  const sql = sqlFiles
+    .map(name => fs.readFileSync(path.join(HERE, "sql", name), "utf8"))
+    .join("\n");
+  const sync = fs.readFileSync(path.join(HERE, "sync.js"), "utf8");
 
   const called = [...sync.matchAll(/callTaskRpc\("([a-z_]+)"/g)]
     .map(m => m[1]);
@@ -3946,15 +4359,18 @@ test("app.js 和 account.js 绑定的元素 id 都在 index.html 里", () => {
   const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
   const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
   const account = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
+  const community = fs.readFileSync(path.join(HERE, "community.js"), "utf8");
 
   /* HTML 里定义的 id */
   const inHtml = matchAll(html, /id="([^"]+)"/g);
   /* JS 里动态生成的 id（模板字符串里写的） */
   const inJs = matchAll(app, /id="([^"]+)"/g)
-    .concat(matchAll(account, /id="([^"]+)"/g));
+    .concat(matchAll(account, /id="([^"]+)"/g))
+    .concat(matchAll(community, /id="([^"]+)"/g));
   /* JS 里查的 id。只认 $("...") —— 这是本项目的取元素约定。 */
   const queried = matchAll(app, /\$\("([^"]+)"\)/g)
-    .concat(matchAll(account, /\$\("([^"]+)"\)/g));
+    .concat(matchAll(account, /\$\("([^"]+)"\)/g))
+    .concat(matchAll(community, /\$\("([^"]+)"\)/g));
 
   const known = inHtml.concat(inJs);
   const missing = queried.filter(id => known.indexOf(id) === -1);
@@ -4012,8 +4428,8 @@ test("没有重名声明会撞掉库暴露的全局量", () => {
     "Capacitor",    // Capacitor 原生桥
     "cordova",      // Cordova
   ];
-  const files = ["store.js", "calc.js", "charts.js", "assist.js",
-                 "sync.js", "account.js", "app.js"];
+  const files = ["store.js", "calc.js", "charts.js", "merit.js", "assist.js",
+                 "sync.js", "account.js", "community.js", "app.js"];
   const problems = [];
 
   files.forEach(name => {
@@ -4041,8 +4457,8 @@ test("每个源文件都能单独执行且不重复声明", () => {
      做法：把 7 个文件依次在**同一个**上下文里执行一遍。
      有重复声明的话这里会抛 SyntaxError。 */
   const context = makeContext();
-  const files = ["store.js", "calc.js", "charts.js", "assist.js",
-                 "sync.js", "account.js"];
+  const files = ["store.js", "calc.js", "charts.js", "merit.js", "assist.js",
+                 "sync.js", "account.js", "community.js"];
   files.forEach(name => {
     const source = fs.readFileSync(path.join(HERE, name), "utf8");
     try {
@@ -4063,6 +4479,8 @@ test("每个源文件都能单独执行且不重复声明", () => {
     /* renderMe 在 app.js 里（它属于页面路由），不在这里 */
     "account.js": ["renderLogin", "renderTasks", "renderStaff",
                    "openStaffMenu", "syncStaffAccounts"],
+    "community.js": ["renderCommunity", "loadCommunityPosts",
+                     "submitCommunityPost", "deleteCommunityPost"],
   };
   Object.keys(expect).forEach(file => {
     expect[file].forEach(fn => {
@@ -4089,8 +4507,8 @@ test("源码里没有引用只在自检中存在的函数", () => {
      放进来会误报一堆。 */
   const TEST_ONLY = ["plain", "matchAll", "fresh", "makeContext",
                      "COMPILED", "CASES"];
-  const files = ["store.js", "calc.js", "charts.js", "assist.js",
-                 "sync.js", "account.js", "app.js"];
+  const files = ["store.js", "calc.js", "charts.js", "merit.js", "assist.js",
+                 "sync.js", "account.js", "community.js", "app.js"];
   const problems = [];
 
   files.forEach(name => {

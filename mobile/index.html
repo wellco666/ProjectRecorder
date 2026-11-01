@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#7c93ad">
+<meta name="theme-color" content="#45c4a8">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="项目记录器">
@@ -84,7 +84,7 @@
            根本没法建自己的账号，只能去跑 SQL。 -->
       <button class="btn ghost" id="btn-register-boss"
               style="width:100%;margin-top:12px">
-        还没有账号？创建一个老板账号</button>
+        创建老板账号</button>
     </div>
   </div>
 </section>
@@ -117,6 +117,20 @@
          而里面的「在管项目 3」和下面的列表是同一份信息。
          首屏要留给真正要看的项目列表。 -->
     <div id="dash-stats" class="summary"></div>
+
+    <!-- **现在谁在干活 + 今日产出 + 待审批。**
+
+         这是老板每天打开 App 第一个要看的东西：
+         人有没有到位、今天产出了多少、有没有卡着等我的事。
+         内容由 app.js 的 renderTeamCard() 填。 -->
+    <div class="card team-card" id="team-card">
+      <div class="card-head"><h3>现在</h3>
+        <span class="meta" id="team-card-time"></span></div>
+      <div class="summary" id="team-summary"></div>
+      <div id="team-working"></div>
+      <div id="team-todo"></div>
+      <div id="team-board"></div>
+    </div>
     <!-- 今日打卡。放在首屏靠上、工时趋势和项目列表之前：
          习惯最大的敌人是"忘"，放得深等于没做。
          一排圆圈横向滚动，点一下就打上。 -->
@@ -223,6 +237,41 @@
     <!-- 员工端的通知提示条。"老板派了新任务"就显示在这里，
          比只在底部导航点个红点更容易被看到。 -->
     <div id="notify-banner-tasks"></div>
+
+    <!-- **开工 / 收工。放在整页最上面。**
+
+         员工一天里最常做的两件事就是"开始"和"结束"，
+         所以给它第一屏、最大的按钮。
+         中间那串时间在跑，是"我正在被记录"的可视证据。 -->
+    <div class="card work-card" id="work-card">
+      <div class="work-line" id="work-line">还没开始</div>
+      <div class="work-timer" id="work-timer">00:00:00</div>
+      <!-- 今天一共记了多久。**没有这行，用户收工后看不到任何痕迹**，
+           会以为计时器没在记。 -->
+      <div class="work-total" id="work-total"></div>
+      <button class="btn" id="btn-work" style="width:100%;margin-top:12px">
+        开始工作</button>
+    </div>
+
+    <!-- **记忆源点。放在任务列表上面。**
+
+         这是员工每天最想看的数字（我这周赚了多少），
+         所以给它第一屏、最大的字号。
+         内容全部由 merit.js 的 renderMeritCard() 填。 -->
+    <div class="card merit-card" id="merit-card">
+      <div class="merit-head">
+        <span class="merit-title" id="merit-title">我的记忆源点</span>
+        <span class="merit-month" id="merit-month"></span>
+      </div>
+      <div class="merit-balance">
+        <b id="merit-balance">0</b><span class="merit-unit" id="merit-unit">源点</span>
+      </div>
+      <div class="merit-level" id="merit-level"></div>
+      <div class="merit-list" id="merit-recent"></div>
+      <button class="btn ghost" id="btn-shop"
+              style="width:100%;margin-top:12px">兑换奖励</button>
+    </div>
+
     <div id="tasks-list"></div>
     <div id="tasks-history"></div>
   </div>
@@ -243,7 +292,7 @@
       <select id="assign-employee"></select>
       <label for="assign-title">任务内容 *</label>
       <input id="assign-title">
-      <label for="assign-detail">补充说明（可选）</label>
+      <label for="assign-detail">补充说明</label>
       <input id="assign-detail">
       <div class="row2">
         <div><label for="assign-date">日期</label>
@@ -251,7 +300,7 @@
         <div><label for="assign-hours">预估工时</label>
           <input id="assign-hours" type="number" step="0.5" min="0"></div>
       </div>
-      <label for="assign-project">关联项目（可选）</label>
+      <label for="assign-project">关联项目</label>
       <select id="assign-project"></select>
       <button class="btn" id="btn-assign-submit"
               style="width:100%;margin-top:14px">派发</button>
@@ -282,6 +331,41 @@
   </div>
 </section>
 
+<!-- ====================== 知识星球社区 ====================== -->
+<section id="page-community" class="page hidden">
+  <div class="topbar">
+    <div class="grow">
+      <h1>知识星球</h1>
+      <div class="sub" id="community-sub">所有成员共享同一条消息流</div>
+    </div>
+    <button class="icon-btn" id="btn-community-refresh" title="刷新">↻</button>
+  </div>
+  <div class="body">
+    <div class="card community-composer">
+      <div class="card-head">
+        <h3>发到星球</h3>
+        <span class="meta" id="community-me">尚未登录</span>
+      </div>
+      <div class="chips community-topics" id="community-topics"></div>
+      <textarea id="community-input" maxlength="2000"
+        placeholder="写一条所有成员都能看到的消息。&#10;可以提问、分享经验、同步判断或发出一条灵感。"></textarea>
+      <div class="community-compose-foot">
+        <span class="meta" id="community-count">0 / 2000</span>
+        <button class="btn" id="btn-community-send">发布</button>
+      </div>
+    </div>
+
+    <div class="section-head">
+      <span>全员消息</span>
+      <span class="meta" id="community-status">登录后加载</span>
+    </div>
+    <div id="community-feed"></div>
+    <div class="community-note">
+      社区消息对全部成员可见。请勿发送密码、密钥和他人隐私。
+    </div>
+  </div>
+</section>
+
 <!-- ====================== 员工：我的 ====================== -->
 <!-- 员工需要能看"我报过什么"和"同步到底成没成功"。
      没有这个页面，员工会怀疑自己的记录有没有上去。 -->
@@ -305,17 +389,21 @@
          界面上不摆那个按钮（服务器是预置的，别人看不懂"云服务"），
          但留一条路给"预置的失效了"这种情况。 -->
     <div class="card" id="me-card">
-      <div class="row"><div class="grow meta">姓名</div>
+      <!-- 姓名不单独占一行：页面顶上已经写着"我的 / well"了。
+           同步状态同理，只在出问题时才显示（右上角有徽标）。 -->
+      <div class="row hidden" id="me-name-row">
         <b id="me-name">—</b></div>
-      <div class="row" style="margin-top:6px">
+      <div class="row">
         <div class="grow meta" id="me-code-label">账号</div>
         <b id="me-code">—</b></div>
       <div class="row" style="margin-top:6px">
         <div class="grow meta">身份</div><b id="me-role">—</b></div>
-      <div class="row" style="margin-top:6px">
+      <div class="row hidden" id="me-sync-row" style="margin-top:6px">
         <div class="grow meta">同步状态</div>
         <b id="me-sync">—</b></div>
-      <div class="row" style="margin-top:6px">
+      <!-- 待上传：只有真有待上传的东西时才显示。
+           天天摆一行"待上传 0 条"是纯噪音。 -->
+      <div class="row hidden" id="me-pending-row" style="margin-top:6px">
         <div class="grow meta">待上传</div><b id="me-pending">0 条</b></div>
       <!-- **找回邮箱。**
            忘了密码要靠邮箱收验证码，所以这里必须能看见绑的是哪个。
@@ -348,7 +436,13 @@
               style="width:100%;margin-top:8px">切换主题</button>
       <button class="btn ghost" id="btn-me-accounts"
               style="width:100%;margin-top:8px">管理员工账号</button>
+      <button class="btn ghost" id="btn-me-rewards"
+              style="width:100%;margin-top:8px">兑换商品</button>
     </div>
+
+    <!-- 只有员工需要：请假。（老板给自己请假没意义） -->
+    <button class="btn ghost" id="btn-me-leave"
+            style="width:100%;margin-top:8px">我要请假</button>
 
     <button class="btn danger" id="btn-me-logout"
             style="width:100%;margin-top:16px">退出登录</button>
@@ -370,10 +464,12 @@
     <button data-page="dash" class="on"><b>看板</b></button>
     <button data-page="team"><b>团队</b></button>
     <button data-page="assist"><b>助手</b></button>
+    <button data-page="community"><b>星球</b></button>
     <button data-page="me" id="nav-me-boss"><b>我的</b></button>
   </span>
   <span id="nav-staff" class="nav-group hidden">
     <button data-page="tasks"><b>任务</b></button>
+    <button data-page="community"><b>星球</b></button>
     <button data-page="me" id="nav-me-staff"><b>我的</b></button>
   </span>
 </nav>
@@ -420,12 +516,16 @@
 <script src="store.js"></script>
 <script src="calc.js"></script>
 <script src="charts.js"></script>
+<!-- merit.js 要在 app.js 之前：app.js 会在渲染任务页时调
+     renderMeritCard()，晚加载会报未定义。 -->
+<script src="merit.js"></script>
 <script src="assist.js"></script>
 <script src="sync.js"></script>
 <!-- notify.js 要在 app.js 之前：app.js 启动时会调
      renderNotifyBadges / renderNotifyBanner，晚加载会报未定义。 -->
 <script src="notify.js"></script>
 <script src="account.js"></script>
+<script src="community.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

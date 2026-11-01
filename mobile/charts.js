@@ -22,28 +22,38 @@
    一处定义、两处使用，不会出现「界面变深色了、图还是浅色」。
    ============================================================= */
 const THEME_COLORS = {
+  /* **柔和、不刺眼。**
+
+     做法是把所有颜色的饱和度压低、亮度抬高，
+     并且不用纯黑纯白：
+       · 字色是墨绿灰（#3a4742），不是 #000
+       · 主色是淡薄荷（#5ec7b2），不是鲜艳的蓝或绿
+       · 边框是极淡的灰绿，几乎看不见，只用来分隔
+
+     半透明的效果（毛玻璃）在 style.css 里做 ——
+     canvas 画布不支持 backdrop-filter，这里只给纯色值。 */
   light: {
-    bg: "#f4f5f7", panel: "#ffffff", read: "#fafbfc",
-    fg: "#2f3540", fgStrong: "#1b2028", fgSoft: "#4d5563",
-    fgDim: "#78828f", fgFaint: "#a2aab5",
-    line: "#e3e6ea", lineSoft: "#eceef1",
-    accent: "#7c93ad", accentDim: "#5f7893", accentWash: "#e9eef4",
-    accentEdge: "#b6c5d4", hover: "#eef1f4", track: "#eceef1",
-    series: ["#5f7893", "#a8737d", "#7f9e86", "#c4a76a", "#8a7fa8", "#6a9aa8"],
-    levels: { "健康": "#6f9a78", "关注": "#c0a860",
-              "风险": "#c08457", "严重": "#a8606a" },
+    bg: "#fbfdfc", panel: "#ffffff", read: "#f7fbfa",
+    fg: "#3a4742", fgStrong: "#22302b", fgSoft: "#55635e",
+    fgDim: "#7c8c86", fgFaint: "#a9b6b1",
+    line: "#e8f0ed", lineSoft: "#f0f6f4",
+    accent: "#5ec7b2", accentDim: "#3fa893", accentWash: "#e7f7f3",
+    accentEdge: "#c3ebe1", hover: "#f2f9f7", track: "#edf5f2",
+    series: ["#5ec7b2", "#7fb4e0", "#e8b98a", "#b8a0dd", "#e59aa5", "#93cc9b"],
+    levels: { "健康": "#6cbd94", "关注": "#dcb277",
+              "风险": "#e0a186", "严重": "#dd8f94" },
   },
+  /* 暗色同样压低饱和，避免"深底上刺眼的荧光色" */
   dark: {
-    bg: "#191b1f", panel: "#22252a", read: "#1d2024",
-    fg: "#ccd2da", fgStrong: "#e8ecf1", fgSoft: "#aab2bd",
-    fgDim: "#8b939f", fgFaint: "#666d78",
-    line: "#2e3238", lineSoft: "#282b31",
-    /* 暗底上强调色要提亮，否则一片糊 */
-    accent: "#8ea8c4", accentDim: "#a3bcd6", accentWash: "#252b33",
-    accentEdge: "#3c4653", hover: "#282c32", track: "#282b31",
-    series: ["#8ea8c4", "#c08893", "#8fb096", "#d4bb80", "#a894c4", "#7fb0c4"],
-    levels: { "健康": "#82ab8b", "关注": "#d0bb78",
-              "风险": "#d29a72", "严重": "#bd7681" },
+    bg: "#141a19", panel: "#1b2321", read: "#171d1c",
+    fg: "#dbe6e2", fgStrong: "#eef5f2", fgSoft: "#b0bdb8",
+    fgDim: "#87978f", fgFaint: "#63716b",
+    line: "#26302c", lineSoft: "#1f2825",
+    accent: "#6fd0bb", accentDim: "#8fdfcd", accentWash: "#1a2a26",
+    accentEdge: "#31524a", hover: "#1d2724", track: "#212a27",
+    series: ["#6fd0bb", "#8ec4ea", "#eec596", "#c7b0e8", "#eda9b2", "#a3d6aa"],
+    levels: { "健康": "#84cfa8", "关注": "#e6c48f",
+              "风险": "#e9b199", "严重": "#e8a3a7" },
   },
 };
 
@@ -234,7 +244,18 @@ function drawTrend(canvas, labels, series, options) {
     ctx.stroke();
     ctx.fillStyle = palette.fgDim;
     ctx.textAlign = "right";
-    ctx.fillText(String(Math.round((maxValue * i) / ticks)), padLeft - 8, y);
+    /* **刻度标签不能重复。**
+
+       上限很小的时候（比如全是 0，上限被兜底成 1），
+       `Math.round(maxValue * i / ticks)` 会把 0.25 / 0.5 / 0.75 / 1
+       全舍成 0 和 1，纵轴就出现 "1 1 1 0" 这种看不懂的刻度。
+
+       上限 ≤ 4 时保留一位小数，四个刻度就能分得开。 */
+    const tickValue = (maxValue * i) / ticks;
+    const tickLabel = maxValue <= 4
+      ? String(Math.round(tickValue * 10) / 10)
+      : String(Math.round(tickValue));
+    ctx.fillText(tickLabel, padLeft - 8, y);
   }
 
   /* 横坐标位置 */
@@ -331,7 +352,18 @@ function drawBars(canvas, bars, options) {
     ctx.stroke();
     ctx.fillStyle = palette.fgDim;
     ctx.textAlign = "right";
-    ctx.fillText(String(Math.round((maxValue * i) / ticks)), padLeft - 8, y);
+    /* **刻度标签不能重复。**
+
+       上限很小的时候（比如全是 0，上限被兜底成 1），
+       `Math.round(maxValue * i / ticks)` 会把 0.25 / 0.5 / 0.75 / 1
+       全舍成 0 和 1，纵轴就出现 "1 1 1 0" 这种看不懂的刻度。
+
+       上限 ≤ 4 时保留一位小数，四个刻度就能分得开。 */
+    const tickValue = (maxValue * i) / ticks;
+    const tickLabel = maxValue <= 4
+      ? String(Math.round(tickValue * 10) / 10)
+      : String(Math.round(tickValue));
+    ctx.fillText(tickLabel, padLeft - 8, y);
   }
 
   const slot = plotW / bars.length;

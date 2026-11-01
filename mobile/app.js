@@ -155,7 +155,7 @@ function setBanner(element, text, kind) {
    登录页和派任务页没有导航，不用留。 */
 function makeNavScrollable() {
   ["page-dash", "page-team", "page-assist",
-   "page-tasks", "page-me"].forEach(id => {
+   "page-tasks", "page-community", "page-me"].forEach(id => {
     $(id).classList.add("has-nav");
   });
 }
@@ -163,7 +163,7 @@ function makeNavScrollable() {
 /*: 所有页面。加新页面必须登记在这里——
      漏了的话页面永远显示不出来，而且不报错，很难查。 */
 const PAGES = ["login", "dash", "project", "tasks", "team", "assist",
-               "assign", "staff", "me"];
+               "community", "assign", "staff", "me"];
 
 function showPage(name) {
   const target = PAGES.indexOf(name) === -1 ? "dash" : name;
@@ -178,6 +178,12 @@ function showPage(name) {
      显示出来只会让人以为能点。（样式见 style.css 的 .no-nav） */
   document.body.classList.toggle("no-nav", target === "login");
 
+  /* 离开任务页就把走秒的定时器停掉。
+     不停的话切到别的页它还在每秒跑，白耗电。 */
+  if (target !== "tasks" && typeof stopWorkTicker === "function") {
+    stopWorkTicker();
+  }
+
   /* 每个页面自己负责渲染。这里是唯一的入口，
      所以不会出现"某个页面没刷新"的问题。 */
   if (target === "dash") renderDash();
@@ -186,6 +192,7 @@ function showPage(name) {
   if (target === "tasks") renderTasks();
   if (target === "assign") renderAssign();
   if (target === "staff") renderStaff();
+  if (target === "community") renderCommunity();
   if (target === "me") renderMe();
   if (target === "login") renderLogin();
   refreshSyncBadge();
@@ -254,7 +261,7 @@ function renderMe() {
     } else if (isFake) {
       emailTip.innerHTML = '<button class="btn ghost" '
         + 'style="width:100%;margin-top:8px" id="btn-me-bind-email">'
-        + '绑定邮箱（忘了密码时靠它）</button>';
+        + '绑定邮箱</button>';
       const bind = $("btn-me-bind-email");
       if (bind) bind.onclick = openChangeEmail;
     } else {
@@ -284,6 +291,20 @@ function renderMe() {
     syncNode.style.color = "";
   }
   $("me-pending").textContent = status.pending + " 条";
+  /* 没有待上传的就整行藏掉 —— 天天摆一行"待上传 0 条"是纯噪音 */
+  if ($("me-pending-row")) {
+    $("me-pending-row").classList.toggle("hidden", !(status.pending > 0));
+  }
+
+  /* **同步状态只在出问题时显示。**
+
+     一切正常时右上角那个「已同步」徽标已经说明了，
+     卡片里再来一行一模一样的是重复。失败/单机/未登录才值得占位。 */
+  if ($("me-sync-row")) {
+    const normal = status.configured && status.signedIn
+      && status.last && status.last.ok;
+    $("me-sync-row").classList.toggle("hidden", !!normal);
+  }
 
   $("me-boss-extras").classList.toggle("hidden", !isBoss);
 
@@ -310,8 +331,14 @@ function renderMe() {
       && typeof realtimeState !== "undefined" && realtimeState) {
     const good = String(realtimeState).indexOf("SUBSCRIBED") !== -1
       || String(realtimeState).indexOf("收到推送") !== -1;
-    hints.push((good ? "实时推送：" : "实时推送异常：")
-      + "<code>" + escapeHtml(realtimeState) + "</code>");
+    /* **正常时不显示。**
+
+       "实时推送：SUBSCRIBED 13:18:34" 是给排查问题的人看的，
+       普通用户看到只会觉得是一堆天书。只有真出问题时才提示。 */
+    if (!good) {
+      hints.push("实时推送异常："
+        + "<code>" + escapeHtml(realtimeState) + "</code>");
+    }
   }
   /* **登录失效要明说。**
 
@@ -456,6 +483,10 @@ function bindGlobalEvents() {
     button.onclick = () => showPage(button.dataset.page);
   });
 
+  /* 社区的两个固定按钮在这里统一接线。 */
+  $("btn-community-refresh").onclick = () => loadCommunityPosts(true);
+  $("btn-community-send").onclick = () => submitCommunityPost();
+
   /* **按下任何按钮都轻震一下。**
 
      视觉上的缩放进 CSS（.btn:active 等），触感在这里——
@@ -534,6 +565,14 @@ function bindGlobalEvents() {
     toast("已切到" + (next === "dark" ? "深色" : "浅色"));
   };
   $("btn-me-accounts").onclick = () => showPage("staff");
+
+  /* 新加的四项：开工、兑换、请假、商品管理。
+     都是"隐藏了也能点"的做法 —— 按身份判断要不要绑定
+     反而容易漏掉一处，绑了不会出错。 */
+  if ($("btn-work")) $("btn-work").onclick = toggleWork;
+  if ($("btn-shop")) $("btn-shop").onclick = openShopSheet;
+  if ($("btn-me-rewards")) $("btn-me-rewards").onclick = openManageRewards;
+  if ($("btn-me-leave")) $("btn-me-leave").onclick = openLeaveSheet;
 
   /* **「云服务设置」的隐藏入口：长按资料卡片。**
 
@@ -671,7 +710,7 @@ function openMenu() {
 }
 
 function currentPageName() {
-  const pages = ["dash", "project", "team", "assist"];
+  const pages = ["dash", "project", "team", "assist", "community"];
   for (let i = 0; i < pages.length; i += 1) {
     if (!$("page-" + pages[i]).classList.contains("hidden")) return pages[i];
   }
@@ -768,7 +807,7 @@ function dashboardMood(rows, bad) {
    第一眼就该知道今天要不要操心。 */
 function heroLine(mood, rows, bad, weekHours, range) {
   if (mood === "sleepy") {
-    return "还没有项目。";
+    return "";
   }
   if (mood === "alarm") {
     const worst = bad.find(item => item.result.level === "严重");
@@ -829,8 +868,8 @@ function renderHabits() {
   if (!rows.length) {
     title.textContent = "今日打卡";
     row.innerHTML = DB.habits.length
-      ? '<div class="meta" style="padding:4px 0">今天没有要做的习惯。</div>'
-      : '<div class="meta" style="padding:4px 0">还没有习惯。</div>';
+      ? '<div class="meta" style="padding:4px 0">没有习惯</div>'
+      : '<div class="meta" style="padding:4px 0">没有习惯</div>';
     return;
   }
 
@@ -1091,7 +1130,168 @@ function saveHabitForm(id) {
 }
 
 /* ---------------------------------------------------------- 看板 */
+/* 看板顶部那张「现在」卡：谁在干活、今日产出、待审批。
+
+   三块内容从上到下：数字 → 在干活的人 → 等我处理的事。
+   老板扫一眼就知道"要不要现在管点什么"。 */
+function renderTeamCard() {
+  const card = $("team-card");
+  if (!card) return;
+  const profile = DB.profile;
+  if (!profile || profile.role !== "boss") {
+    card.classList.add("hidden");
+    return;
+  }
+  card.classList.remove("hidden");
+
+  const timeBox = $("team-card-time");
+  if (timeBox) {
+    timeBox.textContent = new Date().toTimeString().slice(0, 5);
+  }
+
+  /* ---- 谁在干活：有一条没结束的上工记录就是在干活 ---- */
+  const sessions = (DB.workSessions || []).filter(row => !row.ended_at);
+  const workingIds = sessions.map(row => String(row.profile_id));
+
+  /* ---- 今日产出：今天赚到的源点 ---- */
+  const todayStart = todayISO();
+  const todayEarned = (DB.meritLedger || [])
+    .filter(row => num(row.amount) > 0
+      && meritDayKey(row.created_at) >= todayStart)
+    .reduce((sum, row) => sum + num(row.amount), 0);
+
+  /* ---- 待审批：兑换申请 + 请假 ---- */
+  const pendingRedeem = (DB.redemptions || []).filter(row => row.status === "pending");
+  const pendingLeave = (DB.leaves || []).filter(row => row.status === "pending");
+
+  const summary = $("team-summary");
+  if (summary) {
+    summary.innerHTML =
+      '<span><b>' + workingIds.length + '</b>人在干活</span>'
+      + '<span><b>' + meritNumber(todayEarned) + '</b>' + MERIT.unit + ' 今日产出</span>'
+      + '<span><b>' + (pendingRedeem.length + pendingLeave.length) + '</b>条待审批</span>';
+  }
+
+  /* 在干活的人：头像没有，就直接用名字，别做假头像 */
+  const working = $("team-working");
+  if (working) {
+    if (!workingIds.length) {
+      working.innerHTML = "";
+    } else {
+      const names = workingIds.map(id => {
+        const account = (DB.staffAccounts || []).find(item =>
+          String(item.employee_id) === id);
+        const employee = (DB.employees || []).find(item => String(item.id) === id);
+        return (account && account.name) || (employee && employee.name)
+          || "员工 " + id.slice(0, 6);
+      });
+      working.innerHTML = '<div class="working-list">'
+        + names.map(name => '<span class="working-chip">● '
+          + escapeHtml(name) + '</span>').join("")
+        + '</div>';
+    }
+  }
+
+  /* 待审批：一条一行，两个按钮直接处理 */
+  const todo = $("team-todo");
+  if (!todo) return;
+
+  const rows = [];
+  pendingLeave.forEach(row => {
+    const who = employeeNameOf(row.profile_id);
+    rows.push('<div class="todo-row"><div class="grow">'
+      + '<b>请假</b> · ' + escapeHtml(who)
+      + '<div class="meta">' + escapeHtml(String(row.from_date).slice(0, 10))
+      + ' → ' + escapeHtml(String(row.to_date).slice(0, 10))
+      + (row.reason ? ' · ' + escapeHtml(row.reason) : '') + '</div></div>'
+      + '<button class="chip" data-leave-no="' + escapeHtml(String(row.id)) + '">不准</button>'
+      + '<button class="chip on" data-leave-yes="' + escapeHtml(String(row.id)) + '">准假</button>'
+      + '</div>');
+  });
+  pendingRedeem.forEach(row => {
+    const who = employeeNameOf(row.profile_id);
+    rows.push('<div class="todo-row"><div class="grow">'
+      + '<b>兑换</b> · ' + escapeHtml(who)
+      + '<div class="meta">' + escapeHtml(row.title) + ' · '
+      + num(row.cost) + ' ' + MERIT.unit + '</div></div>'
+      + '<button class="chip" data-redeem-no="' + escapeHtml(String(row.id)) + '">拒</button>'
+      + '<button class="chip on" data-redeem-yes="' + escapeHtml(String(row.id)) + '">给</button>'
+      + '</div>');
+  });
+
+  todo.innerHTML = rows.length
+    ? '<div class="todo-list">' + rows.join("") + '</div>'
+    : '';
+
+  /* ---- 本周榜 ----
+     只排前三。全排出来在手机上太长，而且后几名看着不舒服 ——
+     激励的目的是让人往上冲，不是让人难堪。 */
+  const board = $("team-board");
+  if (board) {
+    const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+    const earned = {};
+    (DB.meritLedger || []).forEach(row => {
+      if (num(row.amount) <= 0) return;
+      if (String(row.created_at || "") < weekAgo) return;
+      const id = String(row.profile_id || "");
+      if (!id) return;
+      earned[id] = (earned[id] || 0) + num(row.amount);
+    });
+    const top = Object.keys(earned)
+      .map(id => ({ id: id, amount: earned[id] }))
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 3);
+
+    board.innerHTML = top.length
+      ? '<div class="section-head" style="margin:16px 2px 6px">本周榜</div>'
+        + top.map((item, index) =>
+          '<div class="board-row"><span class="board-rank">'
+          + (index + 1) + '</span>'
+          + '<span class="grow">' + escapeHtml(employeeNameOf(item.id)) + '</span>'
+          + '<span class="board-amount">+' + meritNumber(item.amount)
+          + ' ' + MERIT.unit + '</span></div>').join("")
+      : "";
+  }
+
+  /* 四条待审批按钮。原来写成一串三元表达式去猜 dataset 的键名，
+     读起来费劲还容易写错，改成显式传属性名。 */
+  const bind = (attr, fn) => {
+    todo.querySelectorAll("[data-" + attr + "]").forEach(button => {
+      button.onclick = async () => {
+        button.disabled = true;
+        try {
+          await fn(button.getAttribute("data-" + attr));
+          renderTeamCard();
+        } catch (error) {
+          button.disabled = false;
+          toast(error.message);
+        }
+      };
+    });
+  };
+
+  bind("leave-yes", id => decideLeave(id, true, ""));
+  bind("leave-no", id => decideLeave(id, false, ""));
+  bind("redeem-yes", id => decideRedemption(id, true));
+  bind("redeem-no", id => decideRedemption(id, false));
+}
+
+/* 从 id 找名字。老板看板上到处要用，抽出来。 */
+function employeeNameOf(profileId) {
+  const id = String(profileId || "");
+  const account = (DB.staffAccounts || []).find(item =>
+    String(item.employee_id) === id);
+  if (account && account.name) return account.name;
+  const employee = (DB.employees || []).find(item => String(item.id) === id);
+  if (employee && employee.name) return employee.name;
+  return "员工 " + id.slice(0, 6);
+}
+
 function renderDash() {
+  /* 「现在」这张卡先画 —— 老板打开 App 最想知道
+     人有没有到位、今天产出了多少、有没有卡着等他的事。 */
+  renderTeamCard();
+
   const rows = projectSummary();
   const bad = rows.filter(item => item.result.level === "风险"
                                || item.result.level === "严重");
@@ -1673,7 +1873,10 @@ function renderTeam() {
   $("load-range").textContent = `最近 ${range.days} 天`;
 
   const canvas = $("load-chart");
-  canvas.dataset.h = Math.max(120, 34 + rows.length * 28);
+  /* 不要留多余的空白。
+     原来最少给 120px，而一行内容只画 62px，
+     下面几十像素全是空的，看起来像"图表没加载出来"。 */
+  canvas.dataset.h = Math.max(40, 34 + rows.length * 28);
   drawLoad(canvas, rows.map(row => ({
     name: row.name, hours: row.hours, ratio: row.ratio,
   })), { height: Number(canvas.dataset.h), empty: "还没有员工" });
@@ -1696,10 +1899,14 @@ function renderTeam() {
   })).sort((a, b) => b.values[0] - a.values[0]);
 
   const projectCanvas = $("project-chart");
-  projectCanvas.dataset.h = "200";
+  /* 没有数据时不要摆一个 200px 高的空盒子 ——
+     里面只有一行"还没有记录"，下面全是空白，
+     看起来像图表加载失败。有数据才给足高度。 */
+  const projectH = projectBars.length ? 200 : 92;
+  projectCanvas.dataset.h = String(projectH);
   $("project-range").textContent = `近 ${range.days} 天`;
   drawBars(projectCanvas, projectBars, {
-    height: 200,
+    height: projectH,
     empty: "这段时间还没有工时记录",
   });
 
@@ -1938,8 +2145,14 @@ function bubbleHtml(item) {
 }
 
 function renderAssist() {
-  const extra = urgentSuggestions();
-  const chips = SUGGESTIONS.concat(extra);
+  /* **去重。** 固定推荐和"按当前数据补的"是两组来源，
+     撞车过：没有项目时两边都出「现在什么情况」，
+     页面上就并排两个一模一样的按钮。源头已经改了，
+     这里再兜一道，免得以后再加推荐时又撞。 */
+  const chips = [];
+  SUGGESTIONS.concat(urgentSuggestions()).forEach(item => {
+    if (chips.indexOf(item) === -1) chips.push(item);
+  });
   $("assist-chips").innerHTML = chips.map(item =>
     `<button class="chip" data-ask="${escapeHtml(item)}">${escapeHtml(item)}</button>`
   ).join("");

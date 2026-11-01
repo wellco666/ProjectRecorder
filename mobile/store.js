@@ -73,11 +73,38 @@ function emptyDatabase() {
     taskRequests: [],
 
     /* 老板端收到的员工工时（来自服务端）。
+
        单独放一张表，**不和本地的 worklogs 混在一起**——
        混的话就没法区分"我自己记的"和"员工报上来的"，
        删除、编辑、去重的处理方式完全不同。
        统计时用 allWorklogs() 把两边合起来。 */
     remoteWorklogs: [],
+
+    /* 记忆源点流水（来自服务端，只读缓存）。
+
+       一条一行：谁、多少、为什么、什么时候。
+
+       **余额不存**，永远由流水求和得出（见 merit.js）。
+       存了余额就会出现"余额和流水对不上"的鬼故事，
+       而且对不上之后查不出是哪一步错的。
+
+       服务端是 merit_ledger 表，写入只走 merit_add 函数，
+       本地这张表只读 —— 所以没有待上传队列。 */
+    meritLedger: [],
+
+    /* 上下工记录（服务端 work_sessions，只读缓存）。
+       有一条 ended_at 为空，就说明这个人正在干活。
+       老板的看板靠它回答"现在谁在干活"。 */
+    workSessions: [],
+
+    /* 兑换商城里的商品（老板维护） */
+    rewards: [],
+
+    /* 兑换申请（员工提的，老板审批） */
+    redemptions: [],
+
+    /* 请假申请 */
+    leaves: [],
 
     /* 老板建的员工账号（本地记录，含待创建的）。
        `pending: true` 表示还没在云端建号。
@@ -236,10 +263,22 @@ function migrate(data) {
   ["projects", "steps", "employees", "worklogs", "assignments",
    "assessments", "metrics", "sessions", "habits", "habitLogs",
    "tasks", "taskLogs", "remoteWorklogs", "staffAccounts", "syncQueue",
-   "notifications"]
+   "notifications", "meritLedger",
+   "workSessions", "rewards", "redemptions", "leaves"]
     .forEach(key => {
       if (!Array.isArray(merged[key])) merged[key] = [];
     });
+
+  /* **清掉历史遗留的本地流水。**
+
+     旧版收工时先在本地插一条 id 形如 local-hours-xxx 的流水，
+     而服务端也会写一条（id 是随机 uuid），于是同一次工作
+     被算了两遍。服务端才是权威，本地那几条一律丢掉；
+     真正没上传成功的，下次拉取会从服务端补回来。 */
+  if (Array.isArray(merged.meritLedger)) {
+    merged.meritLedger = merged.meritLedger.filter(row =>
+      String((row && row.id) || "").indexOf("local-") !== 0);
+  }
   /* 这几个是对象不是数组，单独补。
      写成数组兜底会让 syncCursor[key] 取不到值，静默失效。 */
   if (!merged.syncCursor || typeof merged.syncCursor !== "object"
