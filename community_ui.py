@@ -373,6 +373,9 @@ class CommunityPage(QWidget):
         self.char_label.setStyleSheet("color: #b06a5a;" if count > 2000 else "")
 
     def _load_session(self):
+        existing = getattr(self.window, "account_session", None)
+        if existing is not None:
+            return existing
         raw = None
         if hasattr(self.window, "_settings_get"):
             raw = self.window._settings_get("community_session")
@@ -390,6 +393,16 @@ class CommunityPage(QWidget):
             return
         value = self.session.to_dict() if self.session else {}
         self.window.window_settings_set("community_session", value)
+
+    def apply_account_session(self, session):
+        """主窗口统一账号状态变化后，同步社区页面。"""
+        self.session = session
+        self.posts = [] if session is None else self.posts
+        self._last_error = ""
+        self._set_identity()
+        self._render_feed()
+        if session is not None and self.isVisible():
+            self.refresh_posts(force=True)
 
     def _set_identity(self):
         logged = self.session is not None
@@ -415,6 +428,10 @@ class CommunityPage(QWidget):
             item = self.feed_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # deleteLater() 要等事件循环，登录切换的同一帧里新旧空状态
+                # 会短暂叠在一起。先解除父子关系，立即从界面移除。
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
     def _empty_card(self, title, body):
@@ -551,6 +568,8 @@ class CommunityPage(QWidget):
         self._last_refresh = time.time()
         self._last_error = ""
         self.session = session
+        if hasattr(self.window, "account_session"):
+            self.window.account_session = session
         self._save_session()
         self.posts = list(posts or [])
         self.feed_status.setText(f"{len(self.posts)} 条 · 刚刚更新")
@@ -562,6 +581,8 @@ class CommunityPage(QWidget):
         self._busy = False
         self._last_error = message
         if "重新登录" in message:
+            if hasattr(self.window, "account_session_expired"):
+                self.window.account_session_expired()
             self.session = None
             self.posts = []
             self._save_session()
@@ -575,11 +596,14 @@ class CommunityPage(QWidget):
     def open_login(self):
         dialog = CommunityLoginDialog(self.window)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.session:
-            self.session = dialog.session
-            self._save_session()
-            self._last_error = ""
-            self._set_identity()
-            self.refresh_posts(force=True)
+            if hasattr(self.window, "set_account_session"):
+                self.window.set_account_session(dialog.session)
+            else:
+                self.session = dialog.session
+                self._save_session()
+                self._last_error = ""
+                self._set_identity()
+                self.refresh_posts(force=True)
             if hasattr(self.window, "flash"):
                 self.window.flash(f"{self.session.name} 已加入星球广场")
 
@@ -590,12 +614,15 @@ class CommunityPage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.session = None
-        self.posts = []
-        self._last_error = ""
-        self._save_session()
-        self._set_identity()
-        self._render_feed()
+        if hasattr(self.window, "logout_account"):
+            self.window.logout_account(confirm=False)
+        else:
+            self.session = None
+            self.posts = []
+            self._last_error = ""
+            self._save_session()
+            self._set_identity()
+            self._render_feed()
 
     def publish(self):
         if self.session is None:
@@ -633,6 +660,8 @@ class CommunityPage(QWidget):
     def _on_published(self, session, posts):
         self._busy = False
         self.session = session
+        if hasattr(self.window, "account_session"):
+            self.window.account_session = session
         self._save_session()
         self.posts = list(posts or [])
         self.message_edit.clear()
@@ -651,6 +680,8 @@ class CommunityPage(QWidget):
         self.publish_button.setText("发布消息")
         self._last_error = message
         if "重新登录" in message:
+            if hasattr(self.window, "account_session_expired"):
+                self.window.account_session_expired()
             self.session = None
             self._save_session()
             self._set_identity()

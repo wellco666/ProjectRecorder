@@ -34,6 +34,9 @@ BUNDLED = [
     ("README.md", "."),
     ("preview.html", "."),
     ("mobile/sql/community.sql", "."),
+    ("mobile/sql/unified-platform.sql", "."),
+    ("assets/app_icon.ico", "assets"),
+    ("assets/app_icon.png", "assets"),
 ]
 
 #: 这些模块程序里用不到，排掉能省不少体积
@@ -53,6 +56,7 @@ HIDDEN = [
     "db", "rules", "theme", "widgets", "chart", "detail", "export", "metrics",
     "server", "server_pages", "submit", "timer", "timer_ui",
     "knowledge_planet", "community_client", "community_ui",
+    "cloud_integration", "collaboration",
 ]
 
 
@@ -118,6 +122,9 @@ def main():
         command += ["--exclude-module", module]
     for module in HIDDEN:
         command += ["--hidden-import", module]
+    icon_path = HERE / "assets" / "app_icon.ico"
+    if icon_path.is_file():
+        command += ["--icon", str(icon_path)]
     command += data_specs
     command.append(str(HERE / ENTRY))
 
