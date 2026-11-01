@@ -429,6 +429,12 @@ function applyRoleUI() {
     /* 已经停在任务页就不用动 */
   }
 
+  /* 「我要请假」只给员工看 —— 老板给自己请假没意义，
+     而且那按钮放在「我的」页下半部分，两个身份都显示会显得乱。 */
+  if ($("btn-me-leave")) {
+    $("btn-me-leave").classList.toggle("hidden", !isStaff);
+  }
+
   refreshSyncBadge();
 }
 
@@ -482,7 +488,335 @@ function refreshSyncBadge() {
 
 /* ---------------------------------------------------------- 员工任务页 */
 
+/* ---------------------------------------------------------- 开工 / 收工 */
+
+/* 计时器句柄。离开页面或重新渲染时要清掉，否则会越积越多。 */
+let workTicker = null;
+
+/* 把"从某个时刻到现在"格式化成 时:分:秒 */
+function formatElapsed(fromISO) {
+  const started = new Date(fromISO).getTime();
+  if (!isFinite(started)) return "00:00:00";
+  const total = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  const pad = n => String(n).padStart(2, "0");
+  return pad(Math.floor(total / 3600)) + ":" + pad(Math.floor((total % 3600) / 60))
+    + ":" + pad(total % 60);
+}
+
+/* 停掉计时器。
+
+   离开任务页时必须停 —— 不然用户切到别的页，
+   那个 setInterval 还在每秒改一个看不见的元素，白耗电。 */
+function stopWorkTicker() {
+  if (workTicker) {
+    clearInterval(workTicker);
+    workTicker = null;
+  }
+}
+
+function renderWorkCard() {
+  const card = $("work-card");
+  if (!card) return;
+  if (!DB.profile) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+
+  const open = typeof openWorkSession === "function" ? openWorkSession() : null;
+  const line = $("work-line");
+  const timer = $("work-timer");
+  const button = $("btn-work");
+
+  /* 每次重画先停掉旧计时器，避免两个一起跑 */
+  stopWorkTicker();
+
+  if (open) {
+    /* 跨天了还挂着，八成是忘了收工。**必须提示**，
+       否则用户等到第二天才点结束，会被截到 24 小时，
+       却不知道为什么少了这么多。 */
+    const stale = meritDayKey(open.started_at) < todayISO();
+    line.textContent = (stale ? "⚠ 从 " : "正在记录 · ")
+      + meritTime(open.started_at) + (stale ? " 开始，是不是忘了收工？" : " 开始");
+    timer.textContent = formatElapsed(open.started_at);
+    timer.classList.add("running");
+    button.textContent = "结束工作";
+    button.classList.add("working");
+    workTicker = setInterval(() => {
+      /* 用记录里的开始时间算，不累加 —— 切后台再回来也不会偏 */
+      timer.textContent = formatElapsed(open.started_at);
+    }, 1000);
+  } else {
+    line.textContent = "还没开始";
+    timer.textContent = "00:00:00";
+    timer.classList.remove("running");
+    button.textContent = "开始工作";
+    button.classList.remove("working");
+  }
+
+  /* 今天一共记了多久。
+
+     **这行很重要**：没有它，用户收工后屏幕上什么都没变，
+     会以为计时器根本没在记。数字来自本地的上下工记录，
+     收工那一瞬间就更新，不用等同步。 */
+  const total = $("work-total");
+  if (total) {
+    const today = todayISO();
+    const hours = (DB.workSessions || [])
+      .filter(row => String(row.profile_id) === String(DB.profile.id))
+      .filter(row => row.ended_at
+        && meritDayKey(row.created_at || row.started_at) >= today)
+      .reduce((sum, row) => sum + num(row.hours), 0);
+    total.textContent = hours > 0
+      ? "今天已记 " + (Math.round(hours * 100) / 100) + " 小时"
+      : "";
+  }
+}
+
+async function toggleWork() {
+  const button = $("btn-work");
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  try {
+    const open = typeof openWorkSession === "function" ? openWorkSession() : null;
+    if (open) {
+      const result = await stopWork();
+      const hours = result ? num(result.hours) : 0;
+      const merit = result ? num(result.merit) : 0;
+      const pending = result ? num(result.pending_merit) : 0;
+      /* 三种情况都要说清楚，不能只弹一个"已结束" ——
+         那样用户不知道到底记没记上。 */
+      const capped = !!(result && result.capped);
+      if (hours <= 0) {
+        toast("已结束 · 不到 20 秒，这次没记");
+      } else if (capped) {
+        toast("已结束 · 这次太长了，按 24 小时算 · 待结算 " + pending + " " + MERIT.unit);
+      } else if (pending > 0) {
+        toast("已结束 · 记了 " + hours + " 小时 · 待评级结算 " + pending + " " + MERIT.unit);
+      } else if (merit > 0) {
+        toast("已结束 · 记了 " + hours + " 小时 · +" + merit + " " + MERIT.unit);
+      } else {
+        toast("已结束 · 记了 " + hours + " 小时 · 时间太短，没有" + MERIT.unit);
+      }
+    } else {
+      await startWork(null);
+      toast("开始计时");
+    }
+    renderWorkCard();
+    if (typeof renderMeritCard === "function") renderMeritCard();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* ---------------------------------------------------------- 兑换 */
+
+function openShopSheet() {
+  if (!DB.profile) { toast("先登录"); return; }
+  const me = DB.profile.id;
+  const balance = meritAvailable(me);
+  const rewards = (DB.rewards || []).filter(item => item.active !== false);
+
+  const rows = rewards.map(item => {
+    const cost = num(item.cost);
+    const affordable = balance >= cost;
+    return '<button class="shop-item' + (affordable ? "" : " short") + '"'
+      + ' data-redeem="' + escapeHtml(String(item.id)) + '"'
+      + (affordable ? "" : " disabled") + '>'
+      + '<span class="shop-main"><b>' + escapeHtml(item.title) + '</b>'
+      + (item.detail
+        ? '<span class="meta">' + escapeHtml(item.detail) + '</span>' : "")
+      + '</span>'
+      + '<span class="shop-cost">' + cost + ' ' + MERIT.unit + '</span></button>';
+  }).join("");
+
+  openSheet("兑换奖励", `
+    <div class="hint" style="margin-bottom:12px">
+      余额 ${meritNumber(balance)} ${MERIT.unit}，兑换后由老板发放
+    </div>
+    <div class="shop-list">${rows
+      || '<div class="empty">还没有上架的奖励。等老板加。</div>'}</div>
+  `, [{ label: "关闭", onClick: closeSheet }]);
+
+  const box = $("sheet-body");
+  if (!box) return;
+  box.querySelectorAll("[data-redeem]").forEach(button => {
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        const result = await redeemReward(button.dataset.redeem);
+        closeSheet();
+        renderMeritCard();
+        toast("已兑换，等老板给你"
+          + (result && result.cost ? " · 扣 " + num(result.cost) + " " + MERIT.unit : ""));
+      } catch (error) {
+        button.disabled = false;
+        toast(translateRedeemError(error.message));
+      }
+    };
+  });
+}
+
+function translateRedeemError(message) {
+  const text = String(message || "");
+  if (/not enough points/i.test(text)) return "源点不够，再攒攒";
+  if (/inactive/i.test(text)) return "这个奖励已经下架了";
+  return text;
+}
+
+/* ---------------------------------------------------------- 请假 */
+
+function openLeaveSheet() {
+  const today = todayISO();
+  openSheet("请假", `
+    <label for="lv-from">从哪天</label>
+    <input id="lv-from" type="date" value="${today}">
+    <label for="lv-to">到哪天</label>
+    <input id="lv-to" type="date" value="${today}">
+    <label for="lv-reason">原因（可选）</label>
+    <input id="lv-reason">
+    <div id="lv-error" class="login-error hidden"></div>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: "提交", kind: "", onClick: () => submitLeave() },
+  ]);
+}
+
+async function submitLeave() {
+  const box = $("lv-error");
+  box.classList.add("hidden");
+  const from = $("lv-from").value;
+  const to = $("lv-to").value;
+  if (!from || !to) {
+    box.textContent = "两天日期都要填";
+    box.classList.remove("hidden");
+    return;
+  }
+  if (to < from) {
+    box.textContent = "结束日期早于开始日期";
+    box.classList.remove("hidden");
+    return;
+  }
+
+  const buttons = $("sheet-foot").querySelectorAll(".btn");
+  const submit = buttons[buttons.length - 1];
+  if (submit) { submit.disabled = true; submit.textContent = "提交中…"; }
+  try {
+    await requestLeave(from, to, $("lv-reason").value);
+    closeSheet();
+    toast("已提交，等老板批");
+  } catch (error) {
+    let message = error.message;
+    if (/already asked/i.test(String(message))) {
+      message = "已经有一条申请在等老板批了";
+    } else if (/end date is before/i.test(String(message))) {
+      message = "结束日期早于开始日期";
+    }
+    box.textContent = message;
+    box.classList.remove("hidden");
+  } finally {
+    if (submit) { submit.disabled = false; submit.textContent = "提交"; }
+  }
+}
+
+/* ---------------------------------------------------------- 老板：商品管理 */
+
+function openManageRewards() {
+  const list = DB.rewards || [];
+  const rows = list.map(item => {
+    const off = item.active === false;
+    return '<div class="list-item">'
+      + '<div class="grow"><b>' + escapeHtml(item.title) + '</b>'
+      + '<div class="meta">' + num(item.cost) + ' ' + MERIT.unit
+      + (off ? ' · 已下架' : '') + '</div></div>'
+      + '<button class="icon-btn" data-toggle-reward="'
+      + escapeHtml(String(item.id)) + '">' + (off ? "上架" : "下架") + '</button>'
+      + '</div>';
+  }).join("");
+
+  openSheet("兑换商品", `
+    <div class="hint" style="margin-bottom:12px">
+      员工用${MERIT.name}兑换。下架后不再显示，但历史兑换记录保留。
+    </div>
+    ${rows || '<div class="empty">还没有商品</div>'}
+    <button class="btn" id="btn-add-reward"
+            style="width:100%;margin-top:12px">+ 新增商品</button>
+  `, [{ label: "关闭", onClick: closeSheet }]);
+
+  const box = $("sheet-body");
+  if (!box) return;
+
+  box.querySelectorAll("[data-toggle-reward]").forEach(button => {
+    button.onclick = async () => {
+      const row = (DB.rewards || []).find(item =>
+        String(item.id) === String(button.dataset.toggleReward));
+      if (!row) return;
+      button.disabled = true;
+      try {
+        await setRewardActive(row.id, row.active === false);
+        openManageRewards();
+      } catch (error) {
+        button.disabled = false;
+        toast(error.message);
+      }
+    };
+  });
+
+  const add = $("btn-add-reward");
+  if (add) add.onclick = openAddRewardSheet;
+}
+
+function openAddRewardSheet() {
+  openSheet("新增商品", `
+    <label for="rw-title">叫什么</label>
+    <input id="rw-title" placeholder="下午茶 / 迟到免责券 / 带薪假半天">
+    <label for="rw-cost">多少${MERIT.unit}</label>
+    <input id="rw-cost" type="number" inputmode="numeric" value="50">
+    <label for="rw-detail">说明（可选）</label>
+    <input id="rw-detail">
+    <div id="rw-error" class="login-error hidden"></div>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: "保存", kind: "", onClick: () => submitReward() },
+  ]);
+}
+
+async function submitReward() {
+  const box = $("rw-error");
+  box.classList.add("hidden");
+  const title = $("rw-title").value;
+  const cost = num($("rw-cost").value);
+  if (!String(title).trim()) {
+    box.textContent = "先起个名字";
+    box.classList.remove("hidden");
+    return;
+  }
+  if (cost <= 0) {
+    box.textContent = "价格要大于 0";
+    box.classList.remove("hidden");
+    return;
+  }
+
+  const buttons = $("sheet-foot").querySelectorAll(".btn");
+  const submit = buttons[buttons.length - 1];
+  if (submit) { submit.disabled = true; submit.textContent = "保存中…"; }
+  try {
+    await addReward(title, cost, $("rw-detail").value);
+    toast("已上架");
+    openManageRewards();
+  } catch (error) {
+    box.textContent = error.message;
+    box.classList.remove("hidden");
+  } finally {
+    if (submit) { submit.disabled = false; submit.textContent = "保存"; }
+  }
+}
+
 function renderTasks() {
+  /* 最上面两张卡先画：工时状态和记忆源点。
+     即使今天没有任务，这两个也是员工要看的。 */
+  if (typeof renderWorkCard === "function") renderWorkCard();
+  if (typeof renderMeritCard === "function") renderMeritCard();
+
   const today = todayISO();
   const tasks = tasksOn(today);
   const done = tasks.filter(task => taskLogFor(task.id)).length;
@@ -493,7 +827,7 @@ function renderTasks() {
 
   const row = $("tasks-list");
   if (!tasks.length) {
-    row.innerHTML = '<div class="empty">今天没有派给你的任务。</div>';
+    row.innerHTML = '<div class="empty">今天没有任务</div>';
     renderTaskHistory();
     refreshSyncBadge();
     return;
@@ -501,6 +835,13 @@ function renderTasks() {
 
   row.innerHTML = tasks.map(task => {
     const log = taskLogFor(task.id);
+    /* 实际做了多久。**这是算钱的依据**，预估只是参考。 */
+    const actualHours = (log && log.started_at && log.finished_at)
+      ? Math.min(24, Math.max(0,
+        (new Date(String(log.finished_at).replace(" ", "T")).getTime()
+          - new Date(String(log.started_at).replace(" ", "T")).getTime())
+        / 3600000))
+      : 0;
     const isDone = !!log;
     const started = !!task.started_at;
 
@@ -570,12 +911,28 @@ function renderTasks() {
                 ? "预估 " + num(task.est_hours) + " 小时 · " : ""}
               ${isDone
                 ? "完成于 " + escapeHtml(String(log.finished_at).slice(11, 16))
-                : (started ? "计时中" : "未开始")}
+                  + (actualHours > 0
+                    ? " · 实际 " + (Math.round(actualHours * 100) / 100) + " 小时"
+                    : "")
+                : (started
+                  ? "从 " + escapeHtml(String(task.started_at).slice(11, 16))
+                    + " 起计时"
+                  : "未开始")}
             </div>
             ${rejected
               ? `<div class="meta" style="color:var(--severe)">`
                 + `已拒绝：${escapeHtml(task.accept_reason || "（没写原因）")}</div>`
               : ""}
+            ${task.grade
+              ? `<div class="task-grade">`
+                + `老板验收：<b>${escapeHtml(String(task.grade))} 级</b>`
+                + (num(task.merit_awarded) > 0
+                  ? ` · +${num(task.merit_awarded)} ${MERIT.unit}` : " · 不发源点")
+                + `</div>`
+              : (isDone
+                ? `<div class="meta" style="color:var(--fg-faint);margin-top:4px">`
+                  + `等老板验收</div>`
+                : "")}
 
           </div>
         </div>
@@ -590,7 +947,14 @@ function renderTasks() {
       button.disabled = true;
       try {
         await setTaskAccept(id, true, "");
-        toast("已接受");
+        /* **接受了就开始计时。**
+
+           用户的要求是：接到任务自动开始、做完自动停，
+           而且按计时器的时间算钱。所以接受这一步就
+           把 started_at 记下来，员工不用再单独点一次"开始"。
+           （老版本有个单独的「开始计时」按钮，现在保留兼容。） */
+        try { startTask(id); } catch (error) { /* 计时失败不影响已接受 */ }
+        toast("已接受，开始计时");
         renderTasks();
       } catch (error) {
         toast(error.message);
@@ -1133,9 +1497,29 @@ function renderStaff() {
       ? '<div class="meta" style="color:var(--watch)">云端没建成'
         + (account.lastError ? "：" + escapeHtml(account.lastError) : "")
         + "</div>"
-      : '<div class="meta" style="color:var(--ok)">已生效，可以登录'
+      : '<div class="meta" style="color:var(--ok)">可登录'
         + (account.lastNote ? "（" + escapeHtml(account.lastNote) + "）" : "")
         + "</div>";
+    /* **这个人的源点和工时。**
+
+       这是"记忆源点"系统，老板进员工账号页八成是想看
+       "这个人干得怎么样"，只给姓名和工号等于白来一趟。
+       数字直接从本地流水和上下工记录算，不用额外请求。 */
+    const uid = String(account.employee_id || "");
+    const points = uid ? meritBalance(uid) : 0;
+    const weekStart = weekAgoKey();
+    const weekHours = (DB.workSessions || [])
+      .filter(row => String(row.profile_id) === uid && row.ended_at)
+      .filter(row => meritDayKey(row.created_at || row.started_at) >= weekStart)
+      .reduce((sum, row) => sum + num(row.hours), 0);
+    const statLine = uid
+      ? '<div class="staff-stat">'
+        + '<span class="staff-points">' + meritNumber(points) + " " + MERIT.unit
+        + '</span>'
+        + '<span class="staff-hours">本周 ' + (Math.round(weekHours * 10) / 10)
+        + ' 小时</span></div>'
+      : "";
+
     return `
       <div class="card">
         <div class="row">
@@ -1143,6 +1527,7 @@ function renderStaff() {
             <b>${escapeHtml(account.name)}</b>
             <div class="meta">${escapeHtml(account.code)}</div>
             ${statusLine}
+            ${statLine}
           </div>
           <button class="icon-btn" data-staff-edit="${account.id}">查看</button>
         </div>
@@ -1290,10 +1675,17 @@ function renderAssign() {
     const current = employeeSelect.value;
     const sorted = staff.slice().sort((a, b) =>
       String(a.code).localeCompare(String(b.code)));
-    employeeSelect.innerHTML = sorted.map(account =>
-      `<option value="${escapeHtml(String(account.employee_id))}">`
-      + `${escapeHtml(account.name)}（${escapeHtml(account.code)}）</option>`
-    ).join("");
+    /* **第一项必须是"请选择"占位。**
+
+       下面那句 `value = ""` 是为了不把任务默认派给列表第一个人
+       （那会造成"派错人"），但列表里没有 value="" 的项时，
+       浏览器会把 selectedIndex 设成 -1 —— 下拉框看上去是**空的**，
+       用户以为坏了。加一个占位项，清空时就有字显示。 */
+    employeeSelect.innerHTML = '<option value="">请选择员工</option>'
+      + sorted.map(account =>
+        `<option value="${escapeHtml(String(account.employee_id))}">`
+        + `${escapeHtml(account.name)}（${escapeHtml(account.code)}）</option>`
+      ).join("");
 
     if (current && sorted.some(item =>
         String(item.employee_id) === String(current))) {
@@ -1363,7 +1755,7 @@ function renderAssignList(date) {
     .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
   const box = $("assign-list");
   if (!tasks.length) {
-    box.innerHTML = '<div class="meta">这一天还没有任务。</div>';
+    box.innerHTML = '<div class="meta">还没有任务</div>';
     return;
   }
   const nameById = {};
@@ -1398,6 +1790,28 @@ function renderAssignList(date) {
         + `</div>`
       : "";
 
+    /* **完成 / 验收 / 已发分。**
+
+       三段状态，老板一眼要能分清：
+         还没干完   → 只写一句灰字
+         干完了没验 → 出一个"验收"按钮（这是老板每天要做的动作）
+         已经验过   → 显示等级和发出去多少源点 */
+    const log = taskLogFor(task.id);
+    let gradeLine = "";
+    if (task.grade) {
+      gradeLine = '<div class="meta" style="margin-top:6px;color:var(--ok)">'
+        + '已验收：' + escapeHtml(String(task.grade)) + ' 级 · +'
+        + num(task.merit_awarded) + ' ' + MERIT.unit + '</div>';
+    } else if (log) {
+      gradeLine = '<button class="btn" data-grade-task="'
+        + escapeHtml(String(task.id)) + '" '
+        + 'style="min-height:42px;padding:0 18px;font-size:14px;margin-top:10px">'
+        + '验收 · 发' + MERIT.unit + '</button>';
+    } else if (status === "accepted") {
+      gradeLine = '<div class="meta" style="margin-top:4px;color:var(--fg-faint)">'
+        + '员工还没点完成</div>';
+    }
+
     return `
     <div class="list-item">
       <div class="row">
@@ -1416,14 +1830,31 @@ function renderAssignList(date) {
               || "员工 " + String(task.employee_id || "").slice(0, 6))}
             ${num(task.est_hours) > 0 ? " · 预估 " + num(task.est_hours) + " 小时" : ""}
             ${task.project_name ? " · " + escapeHtml(task.project_name) : ""}
+            ${(() => {
+              /* 员工计时器量出来的实际时长。验收算钱用的是它，
+                 预估只作参考，所以两个并排显示。 */
+              const log = taskLogFor(task.id);
+              if (!log || !log.started_at || !log.finished_at) return "";
+              const h = Math.min(24, Math.max(0,
+                (new Date(String(log.finished_at).replace(" ", "T")).getTime()
+                  - new Date(String(log.started_at).replace(" ", "T")).getTime())
+                / 3600000));
+              return " · 实际 " + (Math.round(h * 100) / 100) + " 小时";
+            })()}
           </div>
           ${statusLine}
           ${extLine}
+          ${gradeLine}
         </div>
         <button class="icon-btn" data-assign-del="${escapeHtml(String(task.id))}">删</button>
       </div>
     </div>`;
   }).join("");
+
+  /* 验收：点开四选一，点完立刻发源点 */
+  box.querySelectorAll("[data-grade-task]").forEach(button => {
+    button.onclick = () => openGradeSheet(button.dataset.gradeTask, date);
+  });
 
   /* 同意延期：直接生效（老板点"同意"通常不想再填什么） */
   box.querySelectorAll("[data-ext-yes]").forEach(button => {
@@ -1453,6 +1884,73 @@ function renderAssignList(date) {
       deleteTask(button.dataset.assignDel);
       renderAssignList(date);
       toast("已删除");
+    };
+  });
+}
+
+/* 老板：验收一条已完成的任务。
+
+   四个选项一次点定，不再问第二遍 —— 老板要的是快。
+   每个选项后面直接写着"点下去发多少源点"，不用心算。 */
+function openGradeSheet(taskId, date) {
+  const task = taskById(taskId);
+  if (!task) { toast("任务不见了"); return; }
+
+  const base = taskBaseMerit(task);
+  const from = taskMeritSource(task);
+  const hours = from.hours;
+
+  const options = ["S", "A", "B", "C"].map(grade => {
+    const amount = taskGradeAmount(task, grade);
+    const percent = Math.round((MERIT.grade[grade] || 0) * 100);
+    return '<button class="grade-option" data-grade="' + grade + '">'
+      + '<span class="grade-letter">' + grade + '</span>'
+      + '<span class="grade-main">'
+      + '<span class="grade-label">' + MERIT.gradeText[grade]
+      + (percent !== 100 ? '（' + percent + '%）' : '') + '</span>'
+      + '<span class="grade-amount">'
+      + (amount > 0 ? "+" + amount + " " + MERIT.unit : "不发")
+      + '</span></span></button>';
+  }).join("");
+
+  openSheet("验收：" + task.title, `
+    <div class="hint" style="margin-bottom:12px">
+      ${from.kind === "actual"
+        ? "实际做了 " + hours + " 小时"
+          + (num(task.est_hours) > 0
+            ? "（预估 " + num(task.est_hours) + " 小时，仅参考）" : "")
+        : (hours > 0 ? "没有计时记录，按预估 " + hours + " 小时" : "没有工时")}
+      ，满额 ${base} ${MERIT.unit}
+    </div>
+    <div class="grade-list">${options}</div>
+  `, [
+    { label: "以后再说", onClick: closeSheet },
+  ]);
+
+  const box = $("sheet-body");
+  if (!box) return;
+  box.querySelectorAll("[data-grade]").forEach(button => {
+    button.onclick = async () => {
+      const grade = button.dataset.grade;
+      box.querySelectorAll(".grade-option").forEach(item => {
+        item.disabled = true;
+      });
+      button.classList.add("picked");
+      try {
+        const result = await gradeTask(taskId, grade);
+        closeSheet();
+        renderAssignList(date);
+        const amount = result && result.amount !== undefined
+          ? num(result.amount) : taskGradeAmount(task, grade);
+        toast(grade + " 级已验收"
+          + (amount > 0 ? "，" + amount + " " + MERIT.unit + " 已到账" : "，不发源点"));
+      } catch (error) {
+        toast(error.message);
+        box.querySelectorAll(".grade-option").forEach(item => {
+          item.disabled = false;
+        });
+        button.classList.remove("picked");
+      }
     };
   });
 }

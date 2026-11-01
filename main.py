@@ -15,7 +15,7 @@ import os
 import sys
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence
+from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
@@ -31,6 +31,9 @@ import rules
 import theme
 from chart import BarChart, LoadChart
 from db import ASSIGN_STATUS, PRIORITY, PROJECT_STATUS, Store
+from community_client import CommunitySession
+from community_ui import CommunityLoginDialog
+from collaboration import CollaborationPage, EmployeeCloudPage
 from detail import ImportDialog, ProjectDialog, SubmitWindow
 from knowledge_planet import KnowledgePlanetPage
 from metrics import budget_usage, load_ratio, num, sum_hours
@@ -43,7 +46,7 @@ from widgets import (
 
 APP_NAME = "项目记录器"
 APP_SUBTITLE = "项目进度 · 人力 · 风险预测 · 知识沉淀"
-VERSION = "1.0"
+VERSION = "2.0"
 
 LEVEL_ORDER = ["严重", "风险", "关注", "健康"]
 
@@ -316,11 +319,17 @@ class MainWindow(QMainWindow):
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._restore_hint)
 
+        # 电脑版与手机版共用同一套 Supabase 账号。登录状态只保存令牌，
+        # 不保存密码；没有登录时仍可继续使用本地项目数据。
+        self.account_session = self._load_account_session()
+
         self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(QIcon(resource_path("assets", "app_icon.ico")))
         self.setMinimumSize(1080, 680)
         self._build_menu()
         self._build_ui()
         self._restore_state()
+        self._refresh_account_ui()
         self.refresh_all()
 
     def _on_remote_submit(self, who, message):
@@ -389,6 +398,14 @@ class MainWindow(QMainWindow):
         act_sessions.triggered.connect(self.show_sessions)
         self.menu_submit.addAction(act_sessions)
 
+        account_menu = bar.addMenu("账号(&A)")
+        self.act_account_login = QAction("登录手机版账号…", self)
+        self.act_account_login.triggered.connect(self.login_account)
+        account_menu.addAction(self.act_account_login)
+        self.act_account_logout = QAction("退出账号", self)
+        self.act_account_logout.triggered.connect(self.logout_account)
+        account_menu.addAction(self.act_account_logout)
+
         view_menu = bar.addMenu("视图(&V)")
         act_refresh = QAction("刷新", self)
         act_refresh.setShortcut("Ctrl+R")
@@ -439,6 +456,14 @@ class MainWindow(QMainWindow):
         top.addWidget(label(APP_SUBTITLE, "ToolMeta"))
         top.addStretch()
 
+        self.account_button = QPushButton("登录手机版账号")
+        self.account_button.setObjectName("AccountButton")
+        self.account_button.setToolTip(
+            "电脑版与手机版使用同一个老板账号或员工号；登录一次即可同步社区身份"
+        )
+        self.account_button.clicked.connect(self._account_button_clicked)
+        top.addWidget(self.account_button)
+
         self.risk_badge = Badge("", theme.palette()["fg_dim"])
         self.risk_badge.setVisible(False)
         top.addWidget(self.risk_badge)
@@ -456,6 +481,11 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.dashboard, "驾驶舱")
         self.knowledge_page = KnowledgePlanetPage(self)
         self.tabs.addTab(self.knowledge_page, "知识星球")
+        self.collaboration_page = CollaborationPage(self)
+        self.tabs.addTab(self.collaboration_page, "协作中心")
+        self.employee_cloud_page = EmployeeCloudPage(self)
+        self.employee_cloud_tab = self.tabs.addTab(self.employee_cloud_page, "我的任务")
+        self.tabs.setTabVisible(self.employee_cloud_tab, False)
         self.assistant_page = AssistantPage(self)
         self.tabs.addTab(self.assistant_page, "小助手")
         self.employee_page = EmployeePage(self)
@@ -489,6 +519,120 @@ class MainWindow(QMainWindow):
         bottom.addStretch()
         bottom.addWidget(self.status_hint)
         outer.addWidget(status)
+
+    # ---------- 统一账号 ----------
+    def _load_account_session(self):
+        raw = self._settings_get("community_session", {})
+        if isinstance(raw, dict):
+            return CommunitySession.from_dict(raw)
+        return None
+
+    def _refresh_account_ui(self):
+        session = self.account_session
+        logged = session is not None
+        if hasattr(self, "account_button"):
+            if logged:
+                role = "老板" if session.role == "boss" else "员工"
+                self.account_button.setText(f"{session.name} · {role}")
+                self.account_button.setToolTip(
+                    f"账号 {session.profile.get('code') or session.name}\n"
+                    "电脑版与手机版共用此账号"
+                )
+            else:
+                self.account_button.setText("登录手机版账号")
+                self.account_button.setToolTip(
+                    "使用手机版同一个老板账号或员工号登录"
+                )
+        if hasattr(self, "tabs"):
+            employee = bool(session and session.role == "employee")
+            boss = bool(session and session.role == "boss")
+            for widget in (self.dashboard, self.collaboration_page,
+                           self.assistant_page, self.employee_page,
+                           self.staffing_page):
+                self.tabs.setTabVisible(self.tabs.indexOf(widget), boss or not logged)
+            if hasattr(self, "employee_cloud_page"):
+                self.tabs.setTabVisible(self.employee_cloud_tab, employee)
+                self.employee_cloud_page.apply_account_session(
+                    session if employee else None
+                )
+            if logged:
+                self.tabs.setCurrentWidget(
+                    self.employee_cloud_page if employee else self.dashboard
+                )
+
+        if hasattr(self, "act_account_login"):
+            self.act_account_login.setText(
+                "切换手机版账号…" if logged else "登录手机版账号…"
+            )
+        if hasattr(self, "act_account_logout"):
+            self.act_account_logout.setEnabled(logged)
+
+    def _account_button_clicked(self):
+        if self.account_session is None:
+            self.login_account()
+            return
+        menu = QMenu(self)
+        show_action = menu.addAction("查看当前账号")
+        switch_action = menu.addAction("切换账号…")
+        menu.addSeparator()
+        logout_action = menu.addAction("退出账号")
+        chosen = menu.exec(
+            self.account_button.mapToGlobal(
+                self.account_button.rect().bottomLeft()
+            )
+        )
+        if chosen is show_action:
+            session = self.account_session
+            role = "老板" if session.role == "boss" else "员工"
+            QMessageBox.information(
+                self, "当前账号",
+                f"姓名：{session.name}\n"
+                f"身份：{role}\n"
+                f"登录名：{session.profile.get('code') or '—'}\n\n"
+                "电脑版与手机版共用这个账号。退出账号不会删除本地项目数据。",
+            )
+        elif chosen is switch_action:
+            self.login_account()
+        elif chosen is logout_action:
+            self.logout_account()
+
+    def login_account(self):
+        dialog = CommunityLoginDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.session:
+            self.set_account_session(dialog.session)
+            role = "老板" if dialog.session.role == "boss" else "员工"
+            self.flash(f"已连接手机版账号：{dialog.session.name}（{role}）", 4200)
+
+    def set_account_session(self, session):
+        self.account_session = session
+        self.window_settings_set(
+            "community_session", session.to_dict() if session else {}
+        )
+        self._refresh_account_ui()
+        if hasattr(self, "knowledge_page"):
+            self.knowledge_page.community_page.apply_account_session(session)
+        if hasattr(self, "collaboration_page"):
+            self.collaboration_page.apply_account_session(session)
+        if hasattr(self, "employee_cloud_page"):
+            self.employee_cloud_page.apply_account_session(
+                session if session and session.role == "employee" else None
+            )
+
+    def account_session_expired(self):
+        self.set_account_session(None)
+        self.flash("手机版账号登录已过期，请重新登录")
+
+    def logout_account(self, confirm=True):
+        if confirm:
+            answer = QMessageBox.question(
+                self, "退出账号",
+                "退出后知识社区会隐藏，但本地项目、员工和工时数据不会被删除。\n"
+                "确定退出账号吗？",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.set_account_session(None)
+        self.flash("已退出手机版账号，本地数据仍在")
 
     # ---------- 数据操作 ----------
     def refresh_all(self):
@@ -537,6 +681,10 @@ class MainWindow(QMainWindow):
         """切到知识星球时重算关联，保证别处新增项目后立即能选。"""
         if self.tabs.widget(index) is self.knowledge_page:
             self.knowledge_page.refresh()
+        elif self.tabs.widget(index) is self.collaboration_page:
+            self.collaboration_page.on_activated()
+        elif self.tabs.widget(index) is self.employee_cloud_page:
+            self.employee_cloud_page.refresh()
 
     def export_data(self):
         import export
@@ -748,7 +896,9 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self, f"关于 {APP_NAME}",
             f"<b>{APP_NAME}</b> {VERSION}<br>{APP_SUBTITLE}<br><br>"
-            "所有数据存在本机，不联网、不上传。<br>"
+            "项目、员工和工时数据默认存在本机。<br>"
+            "电脑版与手机版共用一套 Supabase 账号；"
+            "登录后可同步知识星球社区。<br>"
             "预测由本地规则引擎计算，可复现、可追溯。",
         )
 
@@ -808,6 +958,10 @@ class MainWindow(QMainWindow):
         # 否则后台线程可能正拿着已经关掉的控件或连接继续工作。
         if hasattr(self, "knowledge_page"):
             self.knowledge_page.community_page.shutdown()
+        if hasattr(self, "collaboration_page"):
+            self.collaboration_page.shutdown()
+        if hasattr(self, "employee_cloud_page"):
+            self.employee_cloud_page.shutdown()
         if self.server.running:
             self.server.stop()
         self.store.close()
@@ -1885,6 +2039,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
+    app.setWindowIcon(QIcon(resource_path("assets", "app_icon.ico")))
     app.setFont(QFont("Microsoft YaHei UI", 10))
     app.setStyleSheet(load_stylesheet_text())
 

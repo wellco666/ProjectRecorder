@@ -1,6 +1,6 @@
 {
   "name": "project-recorder-mobile",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "项目记录器 · 安卓版（Capacitor 打包）",
   "scripts": {

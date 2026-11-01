@@ -28,10 +28,12 @@ const FILES = [
   "store.js",
   "calc.js",
   "charts.js",
+  "merit.js",
   "assist.js",
   "sync.js",
   "notify.js",
   "account.js",
+  "community.js",
   "app.js",
 ];
 
