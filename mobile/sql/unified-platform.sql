@@ -552,6 +552,8 @@ begin
 end;
 $fn$;
 
+drop function if exists public.request_leave(date,date,text);
+
 create or replace function public.request_leave(p_from date,p_to date,p_reason text)
 returns jsonb language sql security definer
 set search_path=public,auth,pg_temp

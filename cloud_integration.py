@@ -53,9 +53,10 @@ class CloudIntegrationClient:
         ]
         result = {}
         for table in tables:
-            order = "created_at.desc" if table not in (
-                "projects", "project_steps", "tasks", "knowledge_items"
-            ) else "updated_at.desc"
+            order = "updated_at.desc" if table in (
+                "projects", "project_steps", "tasks", "task_logs",
+                "knowledge_items"
+            ) else "created_at.desc"
             result[table] = self.list(table, {
                 "select": "*", "order": order, "limit": 500,
             })
