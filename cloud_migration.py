@@ -99,9 +99,12 @@ def backup_database():
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="write to cloud")
+    parser.add_argument("--dry-run", action="store_true", help="preview only (default)")
     parser.add_argument("--yes", action="store_true", help="skip confirmation")
     parser.add_argument("--report", default="", help="preview report JSON path")
     args = parser.parse_args(argv)
+    if args.apply and args.dry_run:
+        parser.error("--apply and --dry-run cannot be used together")
 
     session = ensure_session(load_session())
     store = Store()
