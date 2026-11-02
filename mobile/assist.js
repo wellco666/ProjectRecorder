@@ -44,7 +44,10 @@ function urgentSuggestions() {
   const overloaded = rows.filter(row => row.ratio > 1);
   if (overloaded.length) extra.push(`${overloaded[0].name} 的负荷是多少`);
 
-  if (!DB.projects.length) return ["现在什么情况"];
+  /* 没有项目时**什么都不补**。
+     原来这里 return ["现在什么情况"]，而这句话在固定列表里已经有了，
+     于是助手页最下面会多出一个一模一样的按钮。 */
+  if (!DB.projects.length) return [];
 
   const result = [];
   extra.forEach(item => {

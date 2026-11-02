@@ -20,6 +20,7 @@ allprojects {
         google()
         mavenCentral()
         maven { url 'https://mvn.getui.com/nexus/content/repositories/releases/' }
+        maven { url 'https://repo.huaweicloud.com/repository/maven/' }
         maven { url 'https://developer.huawei.com/repo/' }
         maven { url 'https://developer.hihonor.com/repo/' }
     }

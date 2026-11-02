@@ -356,10 +356,29 @@ async function cloudLogin(codeOrEmail, password, options) {
   });
 
   if (lookup.error) {
-    /* 函数还没部署（旧数据库）→ 退回旧办法，起码能登录 */
+    /* 主函数调用失败 —— 可能是旧数据库，也可能只是服务端的
+       接口缓存还没刷新（项目暂停后恢复常见）。
+
+       退一步用 login_emails 试试。 */
     const fallback = await cloudClient.rpc("login_emails", { p_code: text });
-    const list = (!fallback.error && Array.isArray(fallback.data))
-      ? fallback.data.filter(Boolean) : [];
+
+    /* **两个都失败 = 服务器有问题，不能说成"没这个账号"。**
+
+       实测踩到：项目恢复后 PostgREST 的 schema 缓存是旧的，
+       login_email 报错、login_emails 又被收回了权限，
+       于是两个都失败 —— 客户端却弹出「没有这个账号：19155025818」。
+
+       用户看到这句会去重新注册，凭空多出一个重复账号。
+       基础设施故障必须说成基础设施故障。 */
+    if (fallback.error) {
+      const detail = String(lookup.error.message || lookup.error || "");
+      throw new Error("连不上服务器，暂时登录不了。\n\n"
+        + "这是服务器端的问题，不是账号的问题。\n"
+        + "过一会儿再试；一直不行就找管理员刷新一次数据库接口。"
+        + (detail ? "\n（" + detail.slice(0, 60) + "）" : ""));
+    }
+
+    const list = Array.isArray(fallback.data) ? fallback.data.filter(Boolean) : [];
     if (!list.length) throw new Error(noSuchAccount(text));
     return loginWithEmail(list[0], password, options);
   }
@@ -1105,6 +1124,56 @@ async function pullAll() {
     }
   }
 
+  /* ---- 记忆源点流水 ----
+     RLS 已经按 profile_id / boss_id 过滤：
+     员工只拿到自己的，老板拿到全队的。
+     这张表客户端**只读**，写入一律走 merit_add 函数。 */
+  if (typeof MERIT === "object") {
+    let query = cloudClient.from("merit_ledger").select("*")
+      .order("created_at", { ascending: false })
+      .limit(500);
+    if (cursor.merit) query = query.gte("created_at", cursorSafe(cursor.merit));
+    const { data, error } = await query;
+    if (error) {
+      /* 表还没建时不要天天报错 —— 那是部署问题，不是同步失败 */
+      if (!/does not exist|Could not find/i.test(String(error.message || ""))) {
+        noteError("记忆源点", error);
+      }
+    }
+    if (!error && data) {
+      changed += mergeMeritLedger(data);
+      const watermark = latestTimestamp(data, "created_at");
+      if (watermark) DB.syncCursor.merit = watermark;
+    }
+  }
+
+  /* ---- 上下工 / 商城 / 兑换 / 请假 ----
+     四张表都小（一个人的记录不会多），直接全量拉最近若干条，
+     不做增量游标 —— 少一套游标就少一类查不出来的 bug。 */
+  {
+    const tables = [
+      ["work_sessions", "workSessions", mergeWorkSessions, 200],
+      ["rewards", "rewards", mergeRewards, 200],
+      ["redemptions", "redemptions", mergeRedemptions, 200],
+      ["leave_requests", "leaves", mergeLeaves, 200],
+    ];
+
+    for (const [table, key, merge, limit] of tables) {
+      const { data, error } = await cloudClient.from(table).select("*")
+        .order("created_at", { ascending: false })
+        .limit(limit);
+
+      if (error) {
+        /* 表还没建时只是部署问题，不要天天在界面上报错 */
+        if (!/does not exist|Could not find/i.test(String(error.message || ""))) {
+          noteError(table, error);
+        }
+        continue;
+      }
+      if (data) changed += merge(data);
+    }
+  }
+
   /* ---- 工时（老板端拉员工的，员工端拉自己确认过的） ---- */
   {
     let query = cloudClient.from("worklogs").select("*")
@@ -1224,6 +1293,47 @@ function mergeTasks(rows) {
    和 tasks 不同，这里的记录**不会被客户端改**（写操作都在服务端
    函数里做），所以直接覆盖是安全的——老板批了之后，员工下次同步
    拉到的就是 approved 了。 */
+function mergeMeritLedger(rows) {
+  if (!Array.isArray(DB.meritLedger)) DB.meritLedger = [];
+  let changed = 0;
+  rows.forEach(row => {
+    const existing = DB.meritLedger.find(item => item.id === row.id);
+    if (existing) Object.assign(existing, row);
+    else { DB.meritLedger.push(row); changed += 1; }
+  });
+  if (changed || rows.length) _save();
+  return changed;
+}
+
+/* ---------------------------------------------------------------
+ *  四张小表的合并。
+ *
+ *  写法完全一样，所以用一个工厂生成 —— 复制四遍只会多四个
+ *  改漏的地方。
+ * --------------------------------------------------------------- */
+function makeMerger(key) {
+  return function merge(rows) {
+    if (!Array.isArray(DB[key])) DB[key] = [];
+    let changed = 0;
+    rows.forEach(row => {
+      const existing = DB[key].find(item => item.id === row.id);
+      if (existing) Object.assign(existing, row);
+      else { DB[key].push(row); changed += 1; }
+    });
+    /* 本地按时间倒序，界面直接用，不用各自排序 */
+    DB[key].sort((a, b) =>
+      String(b.created_at || b.started_at || "")
+        .localeCompare(String(a.created_at || a.started_at || "")));
+    if (changed || rows.length) _save();
+    return changed;
+  };
+}
+
+const mergeWorkSessions = makeMerger("workSessions");
+const mergeRewards = makeMerger("rewards");
+const mergeRedemptions = makeMerger("redemptions");
+const mergeLeaves = makeMerger("leaves");
+
 function mergeTaskRequests(rows) {
   if (!Array.isArray(DB.taskRequests)) DB.taskRequests = [];
   let changed = 0;
@@ -1973,6 +2083,202 @@ async function decideTaskExtension(requestId, approved, note) {
       task.plan_date = String(req.to_date).slice(0, 10);
       task.updated_at = nowISO();
     }
+  }
+  _save();
+  return result;
+}
+
+/* 老板：给一条已完成的任务打分，自动发源点。
+
+   走数据库函数 grade_task（见 sql/task-grade.sql）：
+     · 只有任务的老板本人能打
+     · 任务必须有完成记录（task_logs），不能给没干的活发分
+     · 只能打一次 —— 想改就手动加减，避免重复发钱
+
+   分数怎么算（倍率在 merit.js 的 MERIT.grade）：
+     S 超预期 ×1.2 / A 符合预期 ×1.0 / B 有瑕疵 ×0.8 / C 不合格 ×0
+     基数 = 预估小时 × 汇率，小时数在服务端被夹到 0~24
+     （库里有 500 小时的脏数据，不夹的话一个手滑就能发出去几千分）。 */
+async function gradeTask(taskId, grade) {
+  let result;
+  try {
+    result = await callTaskRpc("grade_task", {
+      p_task: taskId,
+      p_grade: String(grade || "").toUpperCase(),
+    });
+  } catch (error) {
+    /* callTaskRpc 只认识延期/接受那几类报错，验收的几种要在这里翻。
+       不翻的话用户会看到英文 already graded。 */
+    throw new Error(translateGradeError(error.message));
+  }
+
+  /* 本地立刻更新任务上的评级，不用等下一轮同步 */
+  const task = taskById(taskId);
+  if (task) {
+    task.grade = String(grade || "").toUpperCase();
+    task.merit_awarded = result && result.amount !== undefined
+      ? num(result.amount) : task.merit_awarded;
+    task.graded_at = nowISO();
+  }
+
+  /* 同样不本地插流水（会和服务端那条重复），改为立刻拉一次 */
+  _save();
+
+  try {
+    if (typeof pullAll === "function") await pullAll();
+  } catch (error) {
+    /* 拉不到不影响任务已经打完分，下次同步会补 */
+  }
+
+  return result;
+}
+
+/* 打分失败的提示要说清楚卡在哪一步 */
+function translateGradeError(message) {
+  const text = String(message || "");
+  if (/already graded/i.test(text)) {
+    return "这条任务已经验收过了。\n\n要调整源点，去「我的」手动加减。";
+  }
+  if (/not finished yet/i.test(text)) {
+    return "员工还没点「完成」，暂时不能验收。";
+  }
+  if (/not your task/i.test(text)) {
+    return "这条任务不是你派的。";
+  }
+  if (/no such task/i.test(text)) {
+    return "这条任务已经不存在了。";
+  }
+  return text;
+}
+
+/* ---------------------------------------------------------- 上下工 */
+
+/* 现在有没有在干活。有就返回那条记录。 */
+function openWorkSession() {
+  const list = Array.isArray(DB.workSessions) ? DB.workSessions : [];
+  return list.find(row =>
+    String(row.profile_id) === String(DB.profile && DB.profile.id)
+    && !row.ended_at) || null;
+}
+
+async function startWork(taskId) {
+  const result = await callTaskRpc("start_work", {
+    p_task: taskId || null,
+  });
+  if (!Array.isArray(DB.workSessions)) DB.workSessions = [];
+  const now = nowISO();
+  DB.workSessions.unshift({
+    id: result && result.id ? result.id : "local-" + now,
+    boss_id: DB.profile ? DB.profile.boss_id || DB.profile.id : null,
+    profile_id: DB.profile ? DB.profile.id : null,
+    task_id: taskId || null,
+    started_at: (result && result.started_at) || now,
+    ended_at: null,
+    hours: null,
+    created_at: now,
+  });
+  _save();
+  return result;
+}
+
+async function stopWork() {
+  const open = openWorkSession();
+  const result = await callTaskRpc("end_work", {});
+  if (open) {
+    open.ended_at = nowISO();
+    open.hours = result && result.hours !== undefined
+      ? num(result.hours) : open.hours;
+  }
+
+  /* **不要在这里本地插一条流水。**
+
+     试过：收工时先在本地记一笔 +20，界面立刻好看。
+     但服务端也会写一笔，两边的 id 不一样（本地是
+     local-hours-xxx，服务端是随机 uuid），下一轮同步拉回来
+     **两条并存 → 同一次工作算了两遍钱**。
+
+     正确做法：让服务端写，然后立刻拉一次（下面）。 */
+  _save();
+
+  /* **再拉一次云端。**
+
+     服务端收工时会写一条工时记录，但工时的 id 是它生成的，
+     本地拼不出来。不拉的话，"工时"列表要等下一轮同步（最长
+     30 秒）才出现这一条 —— 用户刚收工就看，会以为没记上。 */
+  try {
+    if (typeof pullAll === "function") await pullAll();
+  } catch (error) {
+    /* 拉不到不影响本地已经记下的会话和源点，下次同步会补 */
+  }
+
+  return result;
+}
+
+/* ---------------------------------------------------------- 商城 */
+
+async function addReward(title, cost, detail) {
+  const result = await callTaskRpc("add_reward", {
+    p_title: String(title || "").trim(),
+    p_cost: Math.round(num(cost)),
+    p_detail: String(detail || "").trim(),
+  });
+  await pullAll();
+  return result;
+}
+
+async function setRewardActive(rewardId, active) {
+  const result = await callTaskRpc("set_reward_active", {
+    p_reward: rewardId, p_active: !!active,
+  });
+  const row = (DB.rewards || []).find(item => String(item.id) === String(rewardId));
+  if (row) row.active = !!active;
+  _save();
+  return result;
+}
+
+async function redeemReward(rewardId) {
+  const result = await callTaskRpc("redeem_reward", { p_reward: rewardId });
+  await pullAll();
+  return result;
+}
+
+async function decideRedemption(redemptionId, given) {
+  const result = await callTaskRpc("decide_redemption", {
+    p_redemption: redemptionId, p_given: !!given,
+  });
+  const row = (DB.redemptions || []).find(item =>
+    String(item.id) === String(redemptionId));
+  if (row) {
+    row.status = given ? "given" : "rejected";
+    row.decided_at = nowISO();
+  }
+  _save();
+  return result;
+}
+
+/* ---------------------------------------------------------- 请假 */
+
+async function requestLeave(fromDate, toDate, reason) {
+  const result = await callTaskRpc("request_leave", {
+    p_from: fromDate,
+    p_to: toDate,
+    p_reason: String(reason || "").trim(),
+  });
+  await pullAll();
+  return result;
+}
+
+async function decideLeave(leaveId, approved, note) {
+  const result = await callTaskRpc("decide_leave", {
+    p_leave: leaveId,
+    p_approved: !!approved,
+    p_note: String(note || "").trim(),
+  });
+  const row = (DB.leaves || []).find(item => String(item.id) === String(leaveId));
+  if (row) {
+    row.status = approved ? "approved" : "rejected";
+    row.decided_at = nowISO();
+    row.decision_note = String(note || "").trim();
   }
   _save();
   return result;

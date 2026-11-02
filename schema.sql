@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS project (
     cost        REAL    NOT NULL DEFAULT 0,    -- 已花费
     progress    INTEGER NOT NULL DEFAULT 0,    -- 0~100
     note        TEXT    NOT NULL DEFAULT '',
-    created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+    cloud_id    TEXT    NOT NULL DEFAULT '',
+    version     INTEGER NOT NULL DEFAULT 1
 );
 
 -- 项目的分析步骤（阶段 / 任务）
@@ -36,7 +38,9 @@ CREATE TABLE IF NOT EXISTS step (
     start_date  TEXT    NOT NULL DEFAULT '',
     due_date    TEXT    NOT NULL DEFAULT '',
     progress    INTEGER NOT NULL DEFAULT 0,
-    note        TEXT    NOT NULL DEFAULT ''
+    note        TEXT    NOT NULL DEFAULT '',
+    cloud_id    TEXT    NOT NULL DEFAULT '',
+    version     INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_step_project ON step(project_id, seq);
 
@@ -49,7 +53,8 @@ CREATE TABLE IF NOT EXISTS employee (
     weekly_hours REAL   NOT NULL DEFAULT 40,   -- 每周可用工时，算负荷率的基准
     hired_date  TEXT    NOT NULL DEFAULT '',
     active      INTEGER NOT NULL DEFAULT 1,    -- 1 在职 / 0 离职
-    note        TEXT    NOT NULL DEFAULT ''
+    note        TEXT    NOT NULL DEFAULT '',
+    cloud_profile_id TEXT NOT NULL DEFAULT ''
 );
 
 -- 工时记录
@@ -68,7 +73,12 @@ CREATE TABLE IF NOT EXISTS worklog (
     -- 去重指纹：员工提交文件导入时靠它判断「这条是不是已经在库里」。
     -- 同一个人的同一天、同一项目、同样的工时和说明，指纹相同，
     -- 所以同一个文件导入两次也不会出现两份记录。
-    source_key  TEXT    NOT NULL DEFAULT ''
+    source_key  TEXT    NOT NULL DEFAULT '',
+    cloud_id    TEXT    NOT NULL DEFAULT '',
+    cloud_project_id TEXT NOT NULL DEFAULT '',
+    cloud_step_id TEXT NOT NULL DEFAULT '',
+    version     INTEGER NOT NULL DEFAULT 1,
+    approval_status TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE INDEX IF NOT EXISTS idx_worklog_emp_date ON worklog(employee_id, work_date);
 CREATE INDEX IF NOT EXISTS idx_worklog_project ON worklog(project_id, work_date);
@@ -169,7 +179,9 @@ CREATE TABLE IF NOT EXISTS knowledge (
     status          TEXT    NOT NULL DEFAULT '已沉淀',
     next_review     TEXT    NOT NULL DEFAULT '',
     created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
-    updated_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+    cloud_id        TEXT    NOT NULL DEFAULT '',
+    version         INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_zone ON knowledge(zone, status);
 CREATE INDEX IF NOT EXISTS idx_knowledge_project ON knowledge(project_id);

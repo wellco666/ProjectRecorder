@@ -169,13 +169,25 @@ async function ensureGetuiPushConsent() {
       } else if (!DB.profile || DB.profile.id !== profile.id) {
         record(false, "身份已经切换，这次登录不登记");
       } else {
-        const saved = await cloudClient.from("push_devices").upsert({
-          cid: cid,
-          profile_id: profile.id,
-          platform: "android",
-          notify_settings: notifyPrefs(),
-          updated_at: new Date().toISOString(),
-        }, { onConflict: "cid" });
+        /* **走服务端函数，不直接 upsert。**
+
+           原来这里是 `upsert(..., { onConflict: "cid" })`。
+           cid 是唯一键，而这台手机换过账号时，那一行还挂在
+           上一个账号名下 —— upsert 走 UPDATE 分支，可 RLS 只让
+           改自己的行，于是必然报：
+
+             new row violates row-level security policy (USING expression)
+
+           结果就是「后台推送没登记上」一直挂着，推送发到旧地址，
+           手机永远收不到，而且一声不响。
+
+           register_push_device 会把这条 CID 收回来（删掉旧的、
+           给自己插一条），一台设备同一时间只属于一个人。 */
+        const saved = await cloudClient.rpc("register_push_device", {
+          p_cid: cid,
+          p_platform: "android",
+          p_settings: notifyPrefs(),
+        });
         if (!saved.error) {
           saveSetting("getui_push_registered", true);
           saveSetting("getui_push_last_error", "");

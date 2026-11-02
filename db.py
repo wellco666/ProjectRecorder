@@ -102,6 +102,18 @@ class Store:
         """
         self._ensure_column("worklog", "source_key", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("worklog", "source", "TEXT NOT NULL DEFAULT 'manual'")
+        self._ensure_column("project", "cloud_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("project", "version", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("step", "cloud_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("step", "version", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("employee", "cloud_profile_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("worklog", "cloud_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("worklog", "cloud_project_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("worklog", "cloud_step_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("worklog", "version", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("worklog", "approval_status", "TEXT NOT NULL DEFAULT 'pending'")
+        self._ensure_column("knowledge", "cloud_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("knowledge", "version", "INTEGER NOT NULL DEFAULT 1")
         # 补完列再给老记录填指纹，否则唯一索引建不上（一堆空指纹会撞）
         self._backfill_source_keys()
         # 唯一索引统一在这里建，不放 schema.sql：
@@ -110,6 +122,15 @@ class Store:
         self.conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_worklog_source "
             "ON worklog(project_id, source_key) WHERE source_key <> ''"
+        )
+        for table in ("project", "step", "worklog", "knowledge"):
+            self.conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_cloud_id "
+                f"ON {table}(cloud_id) WHERE cloud_id <> ''"
+            )
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_employee_cloud_profile "
+            "ON employee(cloud_profile_id) WHERE cloud_profile_id <> ''"
         )
 
     def _ensure_column(self, table, column, definition):
