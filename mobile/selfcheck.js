@@ -26,9 +26,11 @@ const HERE = __dirname;
    **必须和 index.html 里 <script src> 的顺序一致**——
    漏掉一个的话，那个文件有语法错也查不出来，
    而语法错在浏览器里表现为"整页空白"，最难查。 */
-const FILES = ["store.js", "calc.js", "charts.js", "merit.js", "assist.js",
-               "sync.js", "notify.js", "identity.js", "today.js",
-               "account.js", "community.js", "app.js"];
+const FILES = ["cloud-config.js", "store.js", "calc.js", "charts.js", "merit.js", "assist.js",
+               "sync.js", "notify.js", "meeting.js", "update.js", "identity.js", "companies.js", "today.js",
+               "decision.js", "operations.js", "execution.js", "intake.js", "account.js",
+               "community.js",
+               "app.js"];
 
 let failed = 0;
 function fail(label, detail) {
@@ -117,6 +119,7 @@ function makeContext() {
     },
   };
   sandbox.window = sandbox;
+  sandbox.__storage = storage;
   return vm.createContext(sandbox);
 }
 
@@ -166,7 +169,7 @@ function matchAll(text, pattern, group) {
      改成 vm.Script 预编译后，每个用例只付"执行"的代价。
 */
 const COMPILED = ["store.js", "calc.js", "assist.js", "charts.js", "merit.js",
-                  "sync.js", "notify.js"]
+                  "sync.js", "notify.js", "operations.js", "execution.js", "intake.js"]
   .map(name => ({
   name,
   script: new vm.Script(fs.readFileSync(path.join(HERE, name), "utf8"),
@@ -283,6 +286,194 @@ test("记一条工时", () => {
   if (run("DB.worklogs.length") !== 1) throw new Error("没进库");
   if (run("DB.worklogs[0].step_id") !== run("window.__s.id")) {
     throw new Error("步骤没关联上");
+  }
+});
+
+test("工时经营标签有兼容默认值并可在修改时更新", () => {
+  fresh();
+  run(`window.__e = addEmployee({name: "王强"});
+    window.__w = addWorklog({employee_id: window.__e.id,
+      work_date: "2026-01-05", hours: 8, content: "默认标签"});`);
+  if (run("DB.worklogs[0].billable") !== true) throw new Error("默认可计费丢失");
+  if (run("DB.worklogs[0].work_kind") !== "project") throw new Error("默认项目类型丢失");
+  if (run("DB.worklogs[0].overtime || DB.worklogs[0].rework")) {
+    throw new Error("加班/返工默认应为否");
+  }
+  run(`updateWorklog(window.__w.id, {billable: false, overtime: true,
+    work_kind: "presales", rework: true, waiting: true, travel: true});`);
+  if (run("DB.worklogs[0].work_kind") !== "presales") throw new Error("类型没更新");
+  if (run("DB.worklogs[0].billable") !== false) throw new Error("可计费没更新");
+  if (run("DB.worklogs[0].travel") !== true) throw new Error("出差没更新");
+});
+
+test("工时经营标签排队后只保留一条并可撤销", () => {
+  fresh();
+  run(`DB.profile = {id: "profile-uuid"};
+    queueWorklogDimensions("11111111-1111-4111-8111-111111111111",
+      {billable: true, work_kind: "project"});
+    queueWorklogDimensions("11111111-1111-4111-8111-111111111111",
+      {billable: false, work_kind: "internal", overtime: true});`);
+  if (run("DB.dimensionQueue.length") !== 1) throw new Error("同一工时重复排队");
+  if (run("DB.dimensionQueue[0].data.work_kind") !== "internal") {
+    throw new Error("后一次标签没覆盖前一次");
+  }
+  if (run("pendingCount()") !== 1) throw new Error("待上传数量没算标签");
+  run('removeQueuedWorklogDimensions("11111111-1111-4111-8111-111111111111");');
+  if (run("DB.dimensionQueue.length") !== 0) throw new Error("撤销后标签仍在队列");
+});
+
+test("本地工时维度保留到拿到云 UUID 后再同步", () => {
+  fresh();
+  run(`DB.profile = {id: "profile-uuid"};
+    queueWorklogDimensions(42, {billable: false, overtime: true,
+      work_kind: "presales", rework: true, waiting: true, travel: true});`);
+  if (run("DB.dimensionQueue.length") !== 1) throw new Error("本地维度没进队列");
+  const reserved = run("DB.dimensionQueue[0].worklog_id");
+  if (!run(`operationsUuid(${JSON.stringify(reserved)})`)) {
+    throw new Error("本地数字 id 没有换成预留云 UUID");
+  }
+  if (run("DB.dimensionQueue[0].local_id") !== null) {
+    throw new Error("维度不应继续永久等待本地 id");
+  }
+  if (run("DB.worklogMigrationQueue[0].local_id") !== "42") {
+    throw new Error("迁移队列没保留本地工时 id");
+  }
+  if (run("DB.dimensionQueue[0].worklog_id") !== reserved) {
+    throw new Error("预留云 UUID 后被意外改写");
+  }
+  if (run("DB.dimensionQueue[0].data.work_kind") !== "presales") {
+    throw new Error("等待同步时维度被丢掉");
+  }
+});
+
+test("本地手工工时排队迁移为云 UUID 并同步维度", () => {
+  fresh();
+  run(`DB.profile = {id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      role: "boss", name: "老板"};
+    window.__e = addEmployee({name: "王强"});
+    window.__p = addProject({name: "本地项目"});
+    window.__w = addWorklog({employee_id: window.__e.id,
+      project_id: window.__p.id, work_date: "2026-01-05",
+      hours: 8, content: "本地手工工时"});
+    DB.employees[0].cloud_id =
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    syncWorklogDimensions(window.__w);`);
+  if (run("DB.worklogMigrationQueue.length") !== 1) {
+    throw new Error("本地工时没有进入迁移队列");
+  }
+  const cloudId = run("DB.worklogMigrationQueue[0].cloud_id");
+  if (!run(`operationsUuid(${JSON.stringify(cloudId)})`)) {
+    throw new Error("迁移队列没有分配云 UUID");
+  }
+  if (run("DB.dimensionQueue.length") !== 1) {
+    throw new Error("维度没有继续排队");
+  }
+  if (run("DB.dimensionQueue[0].worklog_id") !== cloudId) {
+    throw new Error("维度没有绑定预留的云 UUID");
+  }
+  if (run("DB.dimensionQueue[0].local_id") !== null) {
+    throw new Error("维度仍在等待非 UUID");
+  }
+  const built = plain(run("worklogMigrationPayload(DB.worklogMigrationQueue[0])"));
+  if (!built.ready) throw new Error("可映射工时却没有迁移载荷");
+  if (built.payload.employee_id
+      !== "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb") {
+    throw new Error("迁移载荷没有使用云端员工 UUID");
+  }
+  if (built.payload.project_name !== "本地项目") {
+    throw new Error("迁移后丢失本地项目名称");
+  }
+  run("completeWorklogMigration(DB.worklogMigrationQueue[0]);");
+  if (run("DB.worklogMigrationQueue.length") !== 0) {
+    throw new Error("迁移成功后队列没有清掉");
+  }
+  if (run("DB.worklogs[0].cloud_id") !== cloudId) {
+    throw new Error("本地工时没有记录云 UUID");
+  }
+});
+
+test("本地工时缺员工云映射时等待而不是永久拒绝", () => {
+  fresh();
+  run(`DB.profile = {id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      role: "boss", name: "老板"};
+    window.__e = addEmployee({name: "待建号员工"});
+    window.__w = addWorklog({employee_id: window.__e.id,
+      work_date: "2026-01-05", hours: 4, content: "等待建号"});
+    syncWorklogDimensions(window.__w);`);
+  let built = plain(run("worklogMigrationPayload(DB.worklogMigrationQueue[0])"));
+  if (built.ready) throw new Error("没有员工云映射却可以迁移");
+  if (run("DB.worklogMigrationQueue.length") !== 1) {
+    throw new Error("等待状态不应丢失迁移项");
+  }
+  run(`DB.employees[0].cloud_id =
+    "cccccccc-cccc-4ccc-8ccc-cccccccccccc";`);
+  built = plain(run("worklogMigrationPayload(DB.worklogMigrationQueue[0])"));
+  if (!built.ready) throw new Error("员工拿到云 UUID 后仍未恢复迁移");
+});
+
+test("历史非 UUID 维度队列会补建本地工时迁移", () => {
+  fresh();
+  run(`DB.profile = {id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      role: "boss", name: "老板"};
+    window.__e = addEmployee({name: "王强"});
+    DB.employees[0].cloud_id =
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    window.__w = addWorklog({employee_id: window.__e.id,
+      work_date: "2026-01-05", hours: 2, content: "历史本地工时"});
+    DB.dimensionQueue = [{worklog_id: null, local_id: String(window.__w.id),
+      data: {work_kind: "internal", billable: false}}];
+    ensureLocalWorklogMigrationQueues();`);
+  if (run("DB.worklogMigrationQueue.length") !== 1) {
+    throw new Error("历史等待项没有补建迁移队列");
+  }
+  const cloudId = run("DB.worklogMigrationQueue[0].cloud_id");
+  if (run("DB.dimensionQueue[0].worklog_id") !== cloudId) {
+    throw new Error("历史维度项没有改绑云 UUID");
+  }
+  if (run("DB.dimensionQueue[0].local_id") !== null) {
+    throw new Error("历史维度项仍在永久等待");
+  }
+});
+
+test("对象形式的绩效证据也能渲染来源 ID", () => {
+  fresh();
+  const html = run(`(function () {
+    var box = { innerHTML: "", querySelectorAll: function () { return []; } };
+    document.getElementById = function (id) {
+      return id === "my-performance" ? box : null;
+    };
+    window.$ = function (id) { return document.getElementById(id); };
+    window.escapeHtml = function (value) {
+      return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    };
+    DB.myPerformance = {items: [{
+      id: "e1", period: "2026-11", status: "submitted", score: 81,
+      evidence: {type: "worklog", source_id: "w1", label: "客户交付"},
+      employee_statement: "", reviewer_note: ""
+    }]};
+    renderMyPerformance();
+    return box.innerHTML;
+  })();`);
+  if (html.indexOf("worklog w1") === -1) {
+    throw new Error("对象证据没有显示 source_id");
+  }
+});
+
+test("简单模式和权限丢失会清掉经营缓存", () => {
+  fresh();
+  run(`window.$ = function (id) { return document.getElementById(id); };
+    DB.profile = {id: "u1"};
+    DB.uiMode = "simple";
+    DB.operations = {projects: [{name: "secret"}],
+      capacity_gaps: [], performance: [], worklog_summary: {}, at: 1};`);
+  if (run("operationsAllowedInCurrentMode()") !== false) {
+    throw new Error("简单模式被误判为允许经营数据");
+  }
+  run("clearOperationsCache()");
+  if (run("DB.operations.projects.length") !== 0) {
+    throw new Error("权限/模式变化后经营缓存没清空");
   }
 });
 
@@ -520,7 +711,7 @@ test("洞察能抓出顺序矛盾", () => {
     addStep(window.__p.id, {name: "第二步", status: "已完成"});`);
   const found = plain(run("insights()"));
   const hit = found.some(item => item.title.indexOf("顺序矛盾") !== -1);
-  if (!hit) throw new Error("顺序矛盾没被抓出来：" 
+  if (!hit) throw new Error("顺序矛盾没被抓出来："
     + found.map(item => item.title).join("；"));
 });
 
@@ -935,6 +1126,78 @@ test("队列去重不会把不同表混在一起", () => {
   }
 });
 
+test("云端项目与步骤会合并到本地，本机独有项目保留", () => {
+  fresh();
+  run(`mergeCloudProjects([{
+    id: "cloud-project-1", version: 3, name: "云端项目",
+    owner: "老板", client: "", status: "进行中", priority: "中",
+    start_date: "2026-01-01", due_date: "2026-02-01",
+    budget: 100, cost: 20, progress: 50, note: "",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z"
+  }]);
+  mergeCloudProjectSteps([{
+    id: "cloud-step-1", version: 2, project_id: "cloud-project-1",
+    seq: 1, name: "云端步骤", owner: "", status: "未开始",
+    progress: 0, note: "", created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z"
+  }]);
+  DB.projects.push({id: 999, name: "本机独有项目"});`);
+  if (run("DB.projects.length") !== 2) {
+    throw new Error("应当合并 1 个云端项目并保留 1 个本机项目");
+  }
+  if (run("DB.projects.filter(function (p) { return !!p.remote_id; }).length") !== 1) {
+    throw new Error("云端项目没有写入 remote_id");
+  }
+  if (run("DB.steps.length") !== 1 || run("DB.steps[0].name") !== "云端步骤") {
+    throw new Error("云端步骤没有合并到本地");
+  }
+  run(`mergeCloudProjects([{
+    id: "cloud-project-1", version: 3, name: "云端项目",
+    owner: "老板", client: "", status: "进行中", priority: "中",
+    start_date: "2026-01-01", due_date: "2026-02-01",
+    budget: 100, cost: 20, progress: 50, note: "",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z"
+  }]);`);
+  if (run("DB.projects.filter(function (p) { return p.remote_id === 'cloud-project-1'; }).length") !== 1) {
+    throw new Error("重复拉取同一个云端项目时产生了重复记录");
+  }
+});
+
+test("本机新建项目与步骤会进入待上传队列", () => {
+  fresh();
+  run(`DB.profile = {id: "profile-1", name: "老板"};
+    DB.account_scope_id = "profile-1";
+    DB.company_scope_id = "enterprise-1";
+    var p = addProject({name: "本机新项目"});
+    updateProject(p.id, {progress: 30});
+    addStep(p.id, {name: "第一步"});`);
+  if (run("DB.syncQueue.filter(function (x) { return x.table === 'projects'; }).length") !== 1) {
+    throw new Error("项目应当只保留 1 条去重后的待上传记录");
+  }
+  if (run("DB.syncQueue.filter(function (x) { return x.table === 'project_steps'; }).length") !== 1) {
+    throw new Error("步骤没有进入待上传队列");
+  }
+  if (run("DB.syncQueue.find(function (x) { return x.table === 'projects'; }).account_id") !== "profile-1") {
+    throw new Error("项目队列没有绑定当前账号");
+  }
+});
+
+test("云端工时会按项目 UUID 归到本地项目", () => {
+  fresh();
+  run(`DB.projects = [{id: 1, remote_id: "cloud-project-1", name: "云端项目"}];
+    DB.worklogs = [];
+    DB.remoteWorklogs = [{
+      id: "cloud-worklog-1", project_id: "cloud-project-1",
+      employee_id: "employee-1", work_date: "2026-01-02", hours: 2
+    }];`);
+  const rows = plain(run('worklogsFor({project_id: 1, includeRemote: true})'));
+  if (rows.length !== 1 || Number(rows[0].hours) !== 2) {
+    throw new Error("云端工时没有按 remote_id 归到本地项目");
+  }
+});
+
 test("上传成功后只清掉成功的那些", () => {
   fresh();
   run(`queueChange("tasks", "insert", "a", {id: "a"});
@@ -958,19 +1221,97 @@ test("待上传数量算得对", () => {
   if (run("pendingCount()") !== 2) throw new Error("应当是 2");
 });
 
-test("切换账号会重置同步游标和队列", () => {
+test("切换账号保留待上传队列但重置同步游标", () => {
   fresh();
-  /* 必须重置：profile.id 是服务端 uuid，切账号后如果不清 cursor，
-     增量拉取会从上一个人的时间点继续，漏掉新账号的数据。 */
   run(`queueChange("tasks", "insert", "a", {});
     DB.syncCursor = {tasks: "2026-01-01 00:00:00"};
     DB.lastSync = {at: "x", ok: true, pending: 5, message: "旧消息"};
     resetSyncState();`);
-  if (run("DB.syncQueue.length") !== 0) throw new Error("队列没清空");
+  if (run("DB.syncQueue.length") !== 1) {
+    throw new Error("未上传队列被登录/退出流程清空了");
+  }
   if (Object.keys(plain(run("DB.syncCursor"))).length !== 0) {
     throw new Error("游标没清空");
   }
   if (run("DB.lastSync.pending") !== 0) throw new Error("状态没重置");
+});
+
+test("账号数据库彼此隔离且切换后能恢复", () => {
+  fresh();
+  run('activateAccountDatabase("account-a");'
+    + 'addProject({name: "A 的项目"}); saveAll();'
+    + 'activateAccountDatabase("account-b");'
+    + 'addProject({name: "B 的项目"}); saveAll();'
+    + 'activateAccountDatabase("account-a");');
+  if (run("DB.projects.length") !== 1
+      || run("DB.projects[0].name") !== "A 的项目") {
+    throw new Error("切回账号 A 后没有恢复 A 自己的数据");
+  }
+  if (run("DB.account_scope_id") !== "account-a") {
+    throw new Error("数据库没有记录账号 scope");
+  }
+  run('activateAccountDatabase("account-b");');
+  if (run("DB.projects.length") !== 1
+      || run("DB.projects[0].name") !== "B 的项目") {
+    throw new Error("账号 B 读到了账号 A 的数据");
+  }
+});
+
+test("已保存账号属于设备设置，不随账号数据库切换消失", () => {
+  fresh();
+  const accountSource = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
+  new vm.Script(accountSource, { filename: "account.js" }).runInContext(ctx);
+  run('rememberAccount("boss-a", "boss", "老板 A", "pass-a");'
+    + 'activateAccountDatabase("other-account");'
+    + 'rememberAccount("staff-b", "employee", "员工 B", "pass-b");');
+  const rows = plain(run("savedAccountsList()"));
+  if (rows.length !== 2 || rows[0].code !== "staff-b") {
+    throw new Error("切换账号后已保存账号列表没有保留");
+  }
+});
+
+test("多账号连续切换 20 次不串数据", () => {
+  fresh();
+  run('activateAccountDatabase("switch-a"); addProject({name:"A only"}); saveAll();'
+    + 'activateAccountDatabase("switch-b"); addProject({name:"B only"}); saveAll();');
+  for (let i = 0; i < 20; i += 1) {
+    const account = i % 2 === 0 ? "switch-a" : "switch-b";
+    const expected = account === "switch-a" ? "A only" : "B only";
+    run('activateAccountDatabase(' + JSON.stringify(account) + ');');
+    if (run("DB.projects.length") !== 1
+        || run("DB.projects[0].name") !== expected) {
+      throw new Error("第 " + (i + 1) + " 次切换账号发生数据串号");
+    }
+  }
+});
+
+test("旧数据必须显式归属，且旧队列不会自动激活", () => {
+  fresh();
+  run(`DB = emptyDatabase();
+  DB.projects = [{id: 1, name: "旧项目"}];
+  DB.syncQueue = [{id: 1, table: "tasks", op: "insert", key: "old"}];
+  saveAll();
+  activateAccountDatabase("account-owner");
+  claimLegacyDataForCurrentAccount();`);
+  if (run("DB.projects.length") !== 1
+      || run("DB.projects[0].name") !== "旧项目") {
+    throw new Error("确认归属后旧项目没有导入");
+  }
+  if (run("DB.syncQueue.length") !== 0) {
+    throw new Error("旧队列不应自动归到新账号");
+  }
+  const backups = plain(run("databaseBackups()"));
+  if (!backups.length) throw new Error("旧数据导入前没有留备份");
+});
+
+test("切换公司清缓存但不清账号队列", () => {
+  fresh();
+  run('activateAccountDatabase("account-company");'
+    + 'queueChange("tasks", "insert", "pending", {id: "pending"});'
+    + 'clearCompanyScopedCache();');
+  if (run("pendingCount()") !== 1) {
+    throw new Error("切换公司时待上传队列被清空");
+  }
 });
 
 test("云服务配置：预置值可用，用户填的能覆盖", () => {
@@ -1005,6 +1346,53 @@ test("云服务配置：预置值可用，用户填的能覆盖", () => {
   run('saveSyncConfig("", "");');
   const back = plain(run("syncConfig()"));
   if (back.url !== preset.url) throw new Error("清空后没回到预置值");
+});
+
+test("云服务网关：用户只连接中转地址，不直连 Supabase", () => {
+  fresh();
+  run('window.PROJECT_RECORDER_GATEWAY_URL = "https://gateway.example.com/rest/v1/";'
+    + 'saveSyncConfig("", "");');
+  const gateway = plain(run("syncConfig()"));
+  if (gateway.url !== "https://gateway.example.com") {
+    throw new Error("网关地址没有规整或被忽略：" + gateway.url);
+  }
+  if (gateway.custom) throw new Error("预置网关不应标记成用户自定义");
+
+  /* People who used the previous build may have the direct URL persisted.
+     That must migrate to the gateway automatically, not silently keep
+     calling the blocked Supabase domain. */
+  run('saveSyncConfig("https://edchntmyqqjqvpngylgc.supabase.co", "");');
+  if (plain(run("syncConfig()")).url !== "https://gateway.example.com") {
+    throw new Error("旧版预置 Supabase 地址没有迁移到网关");
+  }
+
+  /* A genuinely custom backend still wins. */
+  run('saveSyncConfig("https://custom.example.com", "custom-key");');
+  const custom = plain(run("syncConfig()"));
+  if (custom.url !== "https://custom.example.com" || custom.key !== "custom-key") {
+    throw new Error("用户自定义后端被网关覆盖");
+  }
+
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  const intake = fs.readFileSync(path.join(HERE, "intake.html"), "utf8");
+  const sync = fs.readFileSync(path.join(HERE, "sync.js"), "utf8");
+  const publicIntake = fs.readFileSync(path.join(HERE, "public-intake.js"), "utf8");
+  const build = fs.readFileSync(path.join(HERE, "build-www.js"), "utf8");
+  if (!html.includes("cloud-config.js") ||
+      html.indexOf('<script src="cloud-config.js') > html.indexOf('<script src="sync.js')) {
+    throw new Error("index.html 没有在 sync.js 前加载网关配置");
+  }
+  if (!intake.includes("cloud-config.js") ||
+      intake.indexOf('<script src="cloud-config.js') > intake.indexOf('<script src="public-intake.js')) {
+    throw new Error("公开表单没有在接口脚本前加载网关配置");
+  }
+  if (!sync.includes("PROJECT_RECORDER_GATEWAY_URL") ||
+      !publicIntake.includes("PROJECT_RECORDER_GATEWAY_URL")) {
+    throw new Error("应用没有使用网关地址");
+  }
+  if (!build.includes('"cloud-config.js"')) {
+    throw new Error("APK 构建没有包含 cloud-config.js");
+  }
 });
 
 test("URL 规整化能把各种粘错的形式修回来", () => {
@@ -1125,6 +1513,18 @@ test("英文报错会翻译成能看懂的中文", () => {
   if (unknown !== "Some weird thing") throw new Error("未知错误应当原样返回");
 });
 
+test("老板注册的网络失败必须给出可操作提示", () => {
+  fresh();
+  for (const raw of ["TypeError: Failed to fetch", "NetworkError", "Load failed"]) {
+    const got = run(`translateBossError(${JSON.stringify(raw)})`);
+    if (got.indexOf("手机连不上云服务器") === -1
+        || got.indexOf("Wi-Fi") === -1
+        || got.indexOf("supabase.co") === -1) {
+      throw new Error(`注册网络错误没有给出可操作说明：${got}`);
+    }
+  }
+});
+
 test("本机 uuid 生成不重复且格式正确", () => {
   fresh();
   const ids = [];
@@ -1202,6 +1602,39 @@ test("工时汇总既包含本地也包含员工报的", () => {
   const sources = all.map(item => item.__source).sort();
   if (sources.join(",") !== "cloud,local") {
     throw new Error("来源标记不对：" + sources.join(","));
+  }
+});
+
+test("同步流程先迁移本地工时再上传维度", () => {
+  const source = fs.readFileSync(path.join(HERE, "sync.js"), "utf8");
+  const migrate = source.indexOf(
+    "const migrationsPushed = await pushWorklogMigrationQueue();");
+  const dimensions = source.indexOf(
+    "const dimensionsPushed = await pushDimensionQueue();");
+  if (migrate < 0 || dimensions < 0 || migrate > dimensions) {
+    throw new Error("工时迁移必须先于维度上传");
+  }
+  if (source.indexOf("pendingMigrations") < 0) {
+    throw new Error("等待迁移的工时不能被维度上传误判为失败");
+  }
+});
+
+test("迁移后的本地工时和云端回流不会重复计数", () => {
+  fresh();
+  run(`window.__e = addEmployee({name: "我"});
+    window.__w = addWorklog({employee_id: window.__e.id,
+      work_date: "2026-01-05", hours: 3, content: "迁移工时"});
+    DB.worklogs[0].cloud_id =
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    mergeRemoteWorklogs([{id: DB.worklogs[0].cloud_id,
+      employee_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      work_date: "2026-01-05", hours: 3, content: "迁移工时",
+      project_name: "", source: "manual", approval_status: "pending"}]);`);
+  if (run("DB.remoteWorklogs.length") !== 0) {
+    throw new Error("云端回流被重复放入 remoteWorklogs");
+  }
+  if (run("allWorklogs().length") !== 1) {
+    throw new Error("迁移工时被统计了两遍");
   }
 });
 
@@ -2576,7 +3009,8 @@ test("index.html 里的每个按钮都有 onclick 绑上", () => {
 
      只检查 index.html 里**静态写死**的按钮。 */
   const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
-  const sources = ["app.js", "account.js", "community.js", "today.js"]
+  const sources = ["app.js", "account.js", "community.js", "today.js",
+                   "operations.js", "execution.js", "intake.js"]
     .map(name => fs.readFileSync(path.join(HERE, name), "utf8"))
     .join("\n");
 
@@ -3491,7 +3925,7 @@ test("界面上绑定的每个处理函数都真的有定义", () => {
      那个名字必须在某个文件里被定义过。 */
   const FILES = ["app.js", "account.js", "sync.js", "notify.js",
     "assist.js", "charts.js", "store.js", "identity.js", "today.js",
-    "community.js"];
+    "community.js", "execution.js"];
 
   const defined = new Set();
   FILES.forEach(file => {
@@ -4434,7 +4868,7 @@ test("没有重名声明会撞掉库暴露的全局量", () => {
   ];
   const files = ["store.js", "calc.js", "charts.js", "merit.js", "assist.js",
                  "sync.js", "notify.js", "identity.js", "today.js",
-                 "account.js", "community.js", "app.js"];
+                 "execution.js", "account.js", "community.js", "app.js"];
   const problems = [];
 
   files.forEach(name => {
@@ -4464,7 +4898,7 @@ test("每个源文件都能单独执行且不重复声明", () => {
   const context = makeContext();
   const files = ["store.js", "calc.js", "charts.js", "merit.js", "assist.js",
                  "sync.js", "notify.js", "identity.js", "today.js",
-                 "account.js", "community.js"];
+                 "execution.js", "account.js", "community.js"];
   files.forEach(name => {
     const source = fs.readFileSync(path.join(HERE, name), "utf8");
     try {
@@ -4490,6 +4924,8 @@ test("每个源文件都能单独执行且不重复声明", () => {
                    "openStaffMenu", "syncStaffAccounts", "applyRoleUI"],
     "community.js": ["renderCommunity", "loadCommunityPosts",
                      "submitCommunityPost", "deleteCommunityPost"],
+    "execution.js": ["renderExecution", "loadExecution", "bindExecution",
+                     "executionRpc"],
   };
   Object.keys(expect).forEach(file => {
     expect[file].forEach(fn => {
@@ -4551,6 +4987,7 @@ test("每个页面都有入口（不能只能靠代码跳）", () => {
        · 底部导航按钮（data-page="xxx"）
        · 某个按钮的 data-back="xxx"（返回按钮）
        · 代码里有 showPage("xxx") 调用
+       · 「更多」面板里的入口数组（["xxx", "名称"]）
        · 登录页是特例（启动时直接进） */
   const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
   const account = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
@@ -4569,7 +5006,9 @@ test("每个页面都有入口（不能只能靠代码跳）", () => {
     /* showPage("name") 或 showPage('name') 的调用 */
     const viaCode = new RegExp(
       "showPage\\(\\s*[\"']" + name + "[\"']").test(allCode);
-    if (!viaNav && !viaBack && !viaCode) {
+    const viaMore = new RegExp(
+      "\\[\"" + name + "\",\\s*\"").test(allCode);
+    if (!viaNav && !viaBack && !viaCode && !viaMore) {
       unreachable.push(name);
     }
   });
@@ -4629,6 +5068,30 @@ test("build-www.js 的头像清单和实际文件对得上", () => {
     throw new Error("两份清单不一致——"
       + (onlyApp.length ? "app.js 多：" + onlyApp.join("、") + " " : "")
       + (onlyBuild.length ? "build-www.js 多：" + onlyBuild.join("、") : ""));
+  }
+});
+
+test("星轨陪伴：16 张表情和星空界面完整接入", () => {
+  const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
+  const block = app.match(/const STAR_STICKERS = \[[\s\S]*?\];/);
+  if (!block) throw new Error("app.js 缺少 STAR_STICKERS");
+  const files = matchAll(block[0], /file:\s*"([^"]+)"/g);
+  if (files.length !== 16) throw new Error("星轨表情应当正好 16 张，实际 " + files.length);
+  files.forEach(file => {
+    [`${file}.webp`, `${file}@face.webp`].forEach(name => {
+      if (!fs.existsSync(path.join(HERE, "icons", "star", name))) {
+        throw new Error("缺少星轨表情 " + name);
+      }
+    });
+  });
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  for (const text of ['class="star-sky"', 'id="star-companion"']) {
+    if (!html.includes(text)) throw new Error("index.html 缺少 " + text);
+  }
+  if (!app.includes("renderStarCompanion")) throw new Error("缺少星轨渲染入口");
+  const build = fs.readFileSync(path.join(HERE, "build-www.js"), "utf8");
+  if (!build.includes("prepare-star-stickers.py")) {
+    throw new Error("打包脚本没有检查星轨表情");
   }
 });
 
@@ -4771,7 +5234,8 @@ test("企业治理：今日工位存在", () => {
     if (html.indexOf(`id="${id}"`) === -1) throw new Error(`缺少 ${id}`);
   }
   for (const script of ["today.js", "identity.js"]) {
-    if (html.indexOf(`src="${script}"`) === -1) {
+    const loaded = new RegExp(`src="${script.replace(".", "\\.")}(?:\\?[^"]*)?"`).test(html);
+    if (!loaded) {
       throw new Error(`index.html 没有加载 ${script}`);
     }
   }
@@ -4822,12 +5286,584 @@ test("企业治理：今日工位存在", () => {
   }
 });
 
+test("社区 v2.1：板块、评论、通知和审核完整接线", () => {
+  const community = fs.readFileSync(path.join(HERE, "community.js"), "utf8");
+  const markup = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  for (const marker of [
+    "get_community_boards", "list_community_posts_v2",
+    "get_community_author_cards", "get_community_post", "add_community_comment",
+    "toggle_community_like", "toggle_community_bookmark",
+    "report_community_content", "get_community_notifications",
+    "create_community_board", "moderate_community_post",
+    "community-board-select", "community-notifications-panel",
+  ]) {
+    if (!community.includes(marker) && !markup.includes(marker)) {
+      throw new Error("社区 v2.1 缺少接线：" + marker);
+    }
+  }
+});
+
+test("组织股权：创始人、1.1 权重和解散规则完整接线", () => {
+  const identity = fs.readFileSync(path.join(HERE, "identity.js"), "utf8");
+  const markup = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  for (const marker of [
+    "get_organization_state", "create_organization",
+    "propose_initial_split", "cast_equity_vote",
+    "share_transfer", "employee_pool", "dissolution",
+    "identity-organization",
+  ]) {
+    if (!identity.includes(marker) && !markup.includes(marker)) {
+      throw new Error("组织股权缺少接线：" + marker);
+    }
+  }
+});
+
+test("组织管理：改名、添加成员和股份板块完整接线", () => {
+  const identity = fs.readFileSync(path.join(HERE, "identity.js"), "utf8");
+  const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
+  const sql = fs.readFileSync(path.join(HERE, "sql", "organization-management-v1.sql"), "utf8");
+  for (const marker of [
+    "rename_organization", "add_organization_member",
+    "btn-org-rename", "btn-org-invite-member", "老板号", "openShareDashboard",
+  ]) {
+    if (!identity.includes(marker) && !app.includes(marker)) {
+      throw new Error("组织管理缺少接线：" + marker);
+    }
+  }
+  for (const marker of [
+    "rename_organization", "add_organization_member",
+    "security definer", "organization.renamed", "organization.member_added",
+  ]) {
+    if (!sql.toLowerCase().includes(marker)) {
+      throw new Error("组织管理 SQL 缺少：" + marker);
+    }
+  }
+  if (!app.includes('["shares", "股份"]')) throw new Error("更多菜单缺少股份板块");
+});
+
+test("阶段一：主公司、公司邀请、今日四块和版本检查完整接线", () => {
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  for (const id of [
+    "today-task-list", "today-pending-list", "today-working", "today-company-feed",
+    "app-update-card", "btn-check-update",
+  ]) {
+    if (html.indexOf(`id="${id}"`) === -1) throw new Error(`缺少 ${id}`);
+  }
+  for (const id of ["page-companies", "my-company-invites", "my-company-primary", "my-company-list", "my-company-people"]) {
+    if (html.indexOf(`id="${id}"`) === -1) throw new Error(`缺少 ${id}`);
+  }
+  const identity = fs.readFileSync(path.join(HERE, "identity.js"), "utf8");
+  for (const marker of [
+    "get_primary_company", "set_primary_company",
+    "invite_organization_member", "respond_organization_member_invite",
+    "btn-org-primary", "btn-org-invite-member",
+  ]) {
+    if (identity.indexOf(marker) === -1) throw new Error(`主公司/邀请缺少 ${marker}`);
+  }
+  const update = fs.readFileSync(path.join(HERE, "update.js"), "utf8");
+  if (update.indexOf("latest.json") === -1 || update.indexOf("versionCode") === -1) {
+    throw new Error("版本检查没有接上 latest.json");
+  }
+  const companies = fs.readFileSync(path.join(HERE, "companies.js"), "utf8");
+  for (const marker of ["get_my_companies", "get_company_people", "get_organization_member_invites", "respond_organization_member_invite", "myCompanyInvitesHtml", "data-company-primary", "data-my-company-invite-accept"]) {
+    if (companies.indexOf(marker) === -1) throw new Error(`我的公司缺少 ${marker}`);
+  }
+  const companiesSql = fs.readFileSync(
+    path.join(HERE, "sql", "phase1-my-companies-v1.sql"), "utf8");
+  for (const marker of ["get_my_companies", "get_company_people", "can_view_sensitive"]) {
+    if (companiesSql.indexOf(marker) === -1) throw new Error(`我的公司 SQL 缺少 ${marker}`);
+  }
+  const sql = fs.readFileSync(
+    path.join(HERE, "sql", "phase1-primary-company-member-invites-v1.sql"), "utf8");
+  for (const marker of [
+    "primary_enterprise_id", "organization_member_invites",
+    "invite_organization_member", "respond_organization_member_invite",
+  ]) {
+    if (sql.indexOf(marker) === -1) throw new Error(`阶段一 SQL 缺少 ${marker}`);
+  }
+  const pkg = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8"));
+  if (!/node bump-version\.js/.test(pkg.scripts.apk || "")) {
+    throw new Error("APK 构建没有自动递增版本");
+  }
+});
+
 test("企业治理：积分与模式有本地缓存", () => {
   fresh();
   if (run("DB.uiMode") !== "simple") throw new Error("uiMode 默认应为 simple");
   if (run("DB.pointState.balance") !== 0) throw new Error("积分默认应为 0");
   if (run("Array.isArray(DB.pointState.ledger)") !== true) {
     throw new Error("pointState.ledger 默认应为数组");
+  }
+});
+
+test("股东大会：月度会议、临时会议和请假完整接线", () => {
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  for (const id of ["identity-meetings", "identity-meeting-count"]) {
+    if (html.indexOf(`id="${id}"`) === -1) throw new Error(`缺少 ${id}`);
+  }
+  if (!/src="meeting\.js(?:\?[^"]*)?"/.test(html)) throw new Error("没有加载 meeting.js");
+  const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
+  if (app.indexOf("loadShareholderMeetings") === -1) throw new Error("app.js 没有加载股东大会");
+  const identity = fs.readFileSync(path.join(HERE, "identity.js"), "utf8");
+  if (identity.indexOf("loadShareholderMeetings") === -1) throw new Error("identity.js 没有刷新股东大会");
+  const meeting = fs.readFileSync(path.join(HERE, "meeting.js"), "utf8");
+  for (const text of [
+    "get_shareholder_meetings", "initiate_shareholder_meeting",
+    "vote_shareholder_meeting", "record_shareholder_meeting_attendance_verified",
+    "complete_shareholder_meeting", "请假必须填写原因", "账号验证",
+    "data-meeting-vote", "data-meeting-attend", "identity-meetings",
+  ]) {
+    if (meeting.indexOf(text) === -1) throw new Error(`meeting.js 缺少 ${text}`);
+  }
+  const verifySql = fs.readFileSync(
+    path.join(HERE, "sql", "shareholder-meeting-verification-v1.sql"), "utf8");
+  for (const text of [
+    "record_shareholder_meeting_attendance_verified",
+    "p_verification_code", "identity verification failed",
+    "revoke execute on function public.record_shareholder_meeting_attendance",
+  ]) {
+    if (verifySql.indexOf(text) === -1) throw new Error(`出席验证 SQL 缺少 ${text}`);
+  }
+  const build = fs.readFileSync(path.join(HERE, "build-www.js"), "utf8");
+  if (!/"meeting\.js"/.test(build)) throw new Error("build-www.js 没有打包 meeting.js");
+});
+
+test("决策中心：手机管理审批页完整接线", () => {
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  for (const id of [
+    "page-decisions", "decision-list", "approval-list",
+    "decision-summary", "btn-decisions-refresh",
+  ]) {
+    if (html.indexOf(`id="${id}"`) === -1) throw new Error(`缺少 ${id}`);
+  }
+  if (html.indexOf('data-page="decisions"') === -1) {
+    throw new Error("高级导航缺少经营决策入口");
+  }
+  if (html.indexOf('src="decision.js"') === -1) {
+    throw new Error("index.html 没有加载 decision.js");
+  }
+
+  const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
+  if (!/const PAGES = \[[\s\S]*?"decisions"/.test(app)) {
+    throw new Error("PAGES 没有登记 decisions");
+  }
+  if (app.indexOf('target === "decisions"') === -1
+      || app.indexOf("loadDecisionCenter(true);") === -1) {
+    throw new Error("showPage() 没有加载决策中心");
+  }
+  if (app.indexOf("bindDecisionCenter()") === -1) {
+    throw new Error("app.js 没有绑定决策中心事件");
+  }
+
+  const today = fs.readFileSync(path.join(HERE, "today.js"), "utf8");
+  if (today.indexOf('return management ? "decisions" : "dash";') === -1) {
+    throw new Error("高级管理模式没有默认进入决策中心");
+  }
+
+  const account = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
+  if (account.indexOf('"decisions"') === -1
+      || account.indexOf("loadDecisionCenter") === -1) {
+    throw new Error("账号登录/同步没有刷新决策中心");
+  }
+
+  const build = fs.readFileSync(path.join(HERE, "build-www.js"), "utf8");
+  if (!/"decision\.js"/.test(build)) {
+    throw new Error("build-www.js 没有打包 decision.js");
+  }
+
+  const decision = fs.readFileSync(path.join(HERE, "decision.js"), "utf8");
+  for (const text of [
+    "renderDecisionCenter", "loadDecisionCenter", "bindDecisionCenter",
+    "act_on_decision", "act_on_approval", "data-decision-action",
+    "data-approval-action", "evidence", "impact_days", "impact_amount",
+    "owner_name", "due_at", "actions", "idempotency",
+  ]) {
+    if (decision.indexOf(text) === -1) {
+      throw new Error(`decision.js 缺少 ${text}`);
+    }
+  }
+});
+test("经营摘要：管理页、能力缺口和个人绩效依据完整接线", () => {
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  for (const id of [
+    "page-operations", "operations-projects", "operations-capacity",
+    "operations-performance", "operations-worklog", "btn-operations-refresh",
+    "nav-operations", "btn-my-performance", "my-performance",
+  ]) {
+    if (html.indexOf(`id="${id}"`) === -1) throw new Error(`缺少 ${id}`);
+  }
+  if (html.indexOf('data-page="operations"') === -1) {
+    throw new Error("高级导航缺少经营摘要入口");
+  }
+  if (!/src="operations\.js(?:\?[^"]*)?"/.test(html)) {
+    throw new Error("index.html 没有加载 operations.js");
+  }
+
+  const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
+  if (!/const PAGES = \[[\s\S]*?"operations"/.test(app)) {
+    throw new Error("PAGES 没有登记 operations");
+  }
+  for (const text of [
+    'target === "operations"', "renderOperations()", "loadOperations(true)",
+    "w-billable", "w-overtime", "w-kind", "w-rework", "w-waiting",
+    "w-travel", "syncWorklogDimensions",
+  ]) {
+    if (app.indexOf(text) === -1) throw new Error(`app.js 缺少 ${text}`);
+  }
+
+  const account = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
+  for (const text of ["operations", "nav-operations", "loadOperations"]) {
+    if (account.indexOf(text) === -1) {
+      throw new Error(`account.js 缺少 ${text}`);
+    }
+  }
+
+  const build = fs.readFileSync(path.join(HERE, "build-www.js"), "utf8");
+  if (!/"operations\.js"/.test(build)) {
+    throw new Error("build-www.js 没有打包 operations.js");
+  }
+
+  const operations = fs.readFileSync(
+    path.join(HERE, "operations.js"), "utf8");
+  for (const text of [
+    "renderOperations", "loadOperations", "bindOperations",
+    "get_operations_dashboard", "capacity_gaps", "projected_margin",
+    "collection_gap", "worklog_summary", "performance",
+    "renderMyPerformance", "loadMyPerformanceEvidence",
+    "get_my_performance_evidence", "submit_performance_statement",
+    "upsert_worklog_dimensions", "queueWorklogDimensions",
+    "resolveQueuedWorklogDimensions", "operationsAllowedInCurrentMode",
+    "queueLocalWorklogMigration", "ensureLocalWorklogMigrationQueues",
+    "worklogMigrationPayload", "completeWorklogMigration",
+    "clearOperationsCache", "get_worklog_dimensions",
+    "upsert_profile_skill", "upsert_capacity_demand",
+    "upsert_performance_evidence", "operationsRpc",
+  ]) {
+    if (operations.indexOf(text) === -1) {
+      throw new Error(`operations.js 缺少 ${text}`);
+    }
+  }
+});
+test("执行追踪：手机验收、交接、变更完整接线", () => {
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  for (const id of [
+    "page-execution", "execution-acceptance", "execution-dependencies",
+    "execution-handoffs", "execution-changes", "btn-execution-refresh",
+    "btn-execution-dependency", "nav-execution",
+  ]) {
+    if (html.indexOf(`id="${id}"`) === -1) throw new Error(`缺少 ${id}`);
+  }
+  if (html.indexOf('data-page="execution"') === -1) {
+    throw new Error("导航缺少执行追踪入口");
+  }
+  if (html.indexOf('src="execution.js"') === -1) {
+    throw new Error("index.html 没有加载 execution.js");
+  }
+  const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
+  for (const text of [
+    '"execution"', 'target === "execution"', "renderExecution()",
+    "loadExecution(true)", "bindExecution()",
+  ]) {
+    if (app.indexOf(text) === -1) throw new Error(`app.js 缺少 ${text}`);
+  }
+  const account = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
+  for (const text of ["execution", "nav-execution", "loadExecution"]) {
+    if (account.indexOf(text) === -1) throw new Error(`account.js 缺少 ${text}`);
+  }
+  const build = fs.readFileSync(path.join(HERE, "build-www.js"), "utf8");
+  if (!/"execution\.js"/.test(build)) {
+    throw new Error("build-www.js 没有打包 execution.js");
+  }
+  const executionPath = path.join(HERE, "execution.js");
+  if (!fs.existsSync(executionPath)) {
+    throw new Error("缺少 execution.js");
+  }
+  const execution = fs.readFileSync(executionPath, "utf8");
+  for (const text of [
+    "renderExecution", "loadExecution", "bindExecution", "executionRpc",
+    "get_execution_board", "review_task_acceptance",
+    "accept_task_handoff", "decide_change_request",
+    "create_change_request", "submit_task_acceptance",
+    "upsert_task_dependency", "delete_task_dependency",
+    "openDependencyCreate", "data-execution-action", "execution-allowed",
+  ]) {
+    if (execution.indexOf(text) === -1) {
+      throw new Error(`execution.js 缺少 ${text}`);
+    }
+  }
+  const store = fs.readFileSync(path.join(HERE, "store.js"), "utf8");
+  if (store.indexOf("execution:") === -1) {
+    throw new Error("store.js 缺少 execution 缓存");
+  }
+});
+
+test("工作入口：手机快速记录、公开表单和分诊完整接线", () => {
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  for (const id of [
+    "page-intake", "intake-summary", "intake-requests", "intake-mine",
+    "intake-forms", "btn-intake-quick", "btn-intake-form", "btn-intake-refresh",
+    "btn-intake-settings", "btn-intake-email", "intake-email-aliases",
+  ]) {
+    if (html.indexOf(`id="${id}"`) === -1) throw new Error(`缺少 ${id}`);
+  }
+  if (html.indexOf('data-page="intake"') === -1) {
+    throw new Error("导航缺少工作入口");
+  }
+  if (html.indexOf('src="intake.js"') === -1) {
+    throw new Error("index.html 没有加载 intake.js");
+  }
+  if (html.indexOf('src="vendor/qrcode.min.js"') === -1) {
+    throw new Error("index.html 没有加载二维码组件");
+  }
+  const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
+  for (const text of [
+    '"intake"', 'target === "intake"', "renderIntake()",
+    "loadIntake(true)", "bindIntake()",
+  ]) {
+    if (app.indexOf(text) === -1) throw new Error(`app.js 缺少 ${text}`);
+  }
+  const build = fs.readFileSync(path.join(HERE, "build-www.js"), "utf8");
+  for (const text of ['"intake.js"', '"intake.html"', '"public-intake.js"', '"qrcode.min.js"']) {
+    if (build.indexOf(text) === -1) throw new Error(`build-www.js 缺少 ${text}`);
+  }
+  const intake = fs.readFileSync(path.join(HERE, "intake.js"), "utf8");
+  for (const text of [
+    "renderIntake", "loadIntake", "bindIntake", "intakeRpc",
+    "get_my_intake_requests", "get_intake_board", "create_intake_request",
+    "create_intake_form", "triage_intake_request", "convert_intake_request",
+    "merge_intake_request", "add_intake_message", "intakeShowQr", "openIntakeSettings",
+    "create_intake_email_alias", "openIntakeEmailAlias",
+    "data-intake-action",
+  ]) {
+    if (intake.indexOf(text) === -1) throw new Error(`intake.js 缺少 ${text}`);
+  }
+  const publicForm = fs.readFileSync(path.join(HERE, "public-intake.js"), "utf8");
+  new vm.Script(publicForm, { filename: "public-intake.js" });
+  new vm.Script(
+    fs.readFileSync(path.join(HERE, "vendor", "qrcode.min.js"), "utf8"),
+    { filename: "vendor/qrcode.min.js" },
+  );
+  for (const text of [
+    "get_public_intake_form", "submit_public_intake",
+    "get_public_intake_status", "PUBLIC_SUPABASE_URL",
+  ]) {
+    if (publicForm.indexOf(text) === -1) throw new Error(`public-intake.js 缺少 ${text}`);
+  }
+  const store = fs.readFileSync(path.join(HERE, "store.js"), "utf8");
+  if (store.indexOf("intake:") === -1) {
+    throw new Error("store.js 缺少 intake 缓存");
+  }
+});
+
+test("高级模式：多公司升级后的 ON CONFLICT 已修复", () => {
+  const today = fs.readFileSync(path.join(HERE, "today.js"), "utf8");
+  if (!today.includes("42P10") ||
+      !today.includes("fix-advanced-mode-on-conflict.sql")) {
+    throw new Error("高级模式遇到 42P10 时没有给出修复指引");
+  }
+
+  const sqlPath = path.join(HERE, "sql", "fix-advanced-mode-on-conflict.sql");
+  if (!fs.existsSync(sqlPath)) {
+    throw new Error("缺少高级模式兼容修复 SQL");
+  }
+  const sql = fs.readFileSync(sqlPath, "utf8");
+  if (!/^[\x00-\x7F]*$/.test(sql)) {
+    throw new Error("高级模式修复 SQL 必须保持 ASCII");
+  }
+  const legacy = /on\s+conflict\s*\(\s*owner_profile_id\s*\)/i;
+  if (legacy.test(sql)) {
+    throw new Error("多公司模式下不能再对 owner_profile_id 使用 ON CONFLICT");
+  }
+  for (const text of [
+    "pg_advisory_xact_lock", "active_enterprise_id",
+    "enterprise_members_enterprise_profile_uidx",
+    "grant execute on function public.set_enterprise_ui_mode(text)",
+  ]) {
+    if (!sql.includes(text)) throw new Error("高级模式修复 SQL 缺少 " + text);
+  }
+});
+
+test("多账号同步修复：隔离、队列、协议和组织健康完整接线", () => {
+  fresh();
+  run('activateAccountDatabase("scope-account");'
+    + 'DB.company_scope_id="scope-company";'
+    + 'queueChange("tasks","update","scope-key",{id:"scope-key"});');
+  if (run("DB.syncQueue[0].account_id") !== "scope-account"
+      || run("DB.syncQueue[0].enterprise_id") !== "scope-company") {
+    throw new Error("待上传记录没有绑定账号和公司 scope");
+  }
+
+  const account = fs.readFileSync(path.join(HERE, "account.js"), "utf8");
+  for (const text of [
+    "saved_accounts", "switchAccount", "resetAccountScopedRuntimeState",
+    "maybePromptLegacyDataClaim", "claimLegacyDataForCurrentAccount",
+  ]) {
+    if (!account.includes(text)) throw new Error("account.js 缺少 " + text);
+  }
+  const sync = fs.readFileSync(path.join(HERE, "sync.js"), "utf8");
+  for (const text of [
+    "ensureClientProtocol", "detectQueueConflict", "resolveSyncConflict",
+    "delete_sync_record", "get_sync_tombstones", "applySyncTombstones",
+    "这条待上传数据属于另一个账号", "break;",
+  ]) {
+    if (!sync.includes(text)) throw new Error("sync.js 缺少 " + text);
+  }
+  const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
+  for (const text of [
+    "accountDatabaseKey(lastAccountId)", "localSyncDiagnostics",
+    "btn-local-backup", "data-conflict-local",
+  ]) {
+    if (!app.includes(text)) throw new Error("app.js 缺少 " + text);
+  }
+
+  const sqlPath = path.join(HERE, "sql", "multi-account-sync-health-v1.sql");
+  if (!fs.existsSync(sqlPath)) throw new Error("缺少多账号修复 SQL");
+  const sql = fs.readFileSync(sqlPath, "utf8");
+  for (const text of [
+    "repair_my_organization", "get_organization_health",
+    "register_client_protocol", "client_protocol_versions",
+    "sync_tombstones", "delete_sync_record", "get_sync_tombstones",
+  ]) {
+    if (!sql.includes(text)) throw new Error("多账号 SQL 缺少 " + text);
+  }
+});
+
+test("数据一致性：项目同步、经营摘要和首页使用同一份项目缓存", () => {
+  const sync = fs.readFileSync(path.join(HERE, "sync.js"), "utf8");
+  for (const text of [
+    "pullCloudProjects", "mergeCloudProjects", "mergeCloudProjectSteps",
+    "pushQueuedProject", "pushQueuedProjectStep", "save_project",
+    "save_project_step",
+  ]) {
+    if (!sync.includes(text)) throw new Error("sync.js 缺少 " + text);
+  }
+  const operations = fs.readFileSync(path.join(HERE, "operations.js"), "utf8");
+  for (const text of ["pullCloudProjects", "operationsStaleMessage", "operations-banner"]) {
+    if (!operations.includes(text)) throw new Error("operations.js 缺少 " + text);
+  }
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  if (!html.includes('id="operations-banner"')) {
+    throw new Error("经营摘要缺少旧数据提示区域");
+  }
+  const store = fs.readFileSync(path.join(HERE, "store.js"), "utf8");
+  for (const text of ["queueProjectSync", "queueStepSync", "projectCloudPayload"]) {
+    if (!store.includes(text)) throw new Error("store.js 缺少 " + text);
+  }
+});
+
+test("淡紫星图视觉：场景卡、紫色主题和预览框架完整接线", () => {
+  const html = fs.readFileSync(path.join(HERE, "index.html"), "utf8");
+  for (const text of [
+    "scene-login", "scene-company", "planet-signal-art",
+    'id="today-scene"', "purple-starry-1", "charts.js?v=20261111-purple-starry-1",
+  ]) {
+    if (!html.includes(text)) throw new Error("index.html 缺少 " + text);
+  }
+  const today = fs.readFileSync(path.join(HERE, "today.js"), "utf8");
+  for (const text of [
+    "todaySceneData", "renderTodayScene", "star_04_work",
+    "star_03_tea", "star_08_great", "star_15_tired", "star_02_roger",
+  ]) {
+    if (!today.includes(text)) throw new Error("today.js 缺少 " + text);
+  }
+  const css = fs.readFileSync(path.join(HERE, "style.css"), "utf8");
+  for (const file of ["starfield.svg", "star-cluster.svg"]) {
+    if (!fs.existsSync(path.join(HERE, "icons", "star", file))) {
+      throw new Error("缺少不规则星空素材 " + file);
+    }
+  }
+  for (const text of [
+    "--accent: #705aa8", ".scene-card {", "#nav-simple button {",
+    ".planet-signal-art {", "starfield.svg", "star-cluster.svg", "prefers-reduced-motion",
+  ]) {
+    if (!css.includes(text)) throw new Error("style.css 缺少 " + text);
+  }
+  const charts = fs.readFileSync(path.join(HERE, "charts.js"), "utf8");
+  if (!charts.includes('accent: "#705aa8"')) {
+    throw new Error("图表主题没有同步淡紫色");
+  }
+  const preview = fs.readFileSync(path.join(HERE, "phone-preview.html"), "utf8");
+  if (!preview.includes("#0f1022") || !preview.includes("purple-starry-1")) {
+    throw new Error("手机预览框架没有同步紫色主题");
+  }
+});
+
+test("跨公司老板作为员工记录工时：完整接线", () => {
+  const sync = fs.readFileSync(path.join(HERE, "sync.js"), "utf8");
+  for (const text of [
+    "currentEnterpriseId", "currentEnterpriseOwnerId",
+    "p_enterprise: enterpriseId", "p_enterprise: currentEnterpriseId()",
+    "enterprise_id: task.enterprise_id || currentEnterpriseId()",
+  ]) {
+    if (!sync.includes(text)) throw new Error("sync.js 缺少 " + text);
+  }
+  const app = fs.readFileSync(path.join(HERE, "app.js"), "utf8");
+  for (const text of [
+    "enterpriseMemberRows", "teamMemberRows", "identityHasManagementView()",
+    "profile_id) === id", "openInviteOrganizationMember",
+    "memberRows = enterpriseMemberRows()", "employeeNameOf(draft.employee_id)",
+  ]) {
+    if (!app.includes(text)) throw new Error("app.js 缺少 " + text);
+  }
+  const store = fs.readFileSync(path.join(HERE, "store.js"), "utf8");
+  for (const text of [
+    "function resolveWorker", "currentEnterpriseOwnerId()",
+    "enterprise_id: typeof currentEnterpriseId",
+    "typeof employeeNameOf",
+  ]) {
+    if (!store.includes(text)) throw new Error("store.js 缺少 " + text);
+  }
+  const ops = fs.readFileSync(path.join(HERE, "operations.js"), "utf8");
+  for (const text of [
+    "worklogMigrationEnterpriseId", "enterprise_id: enterpriseId || null",
+  ]) {
+    if (!ops.includes(text)) throw new Error("operations.js 缺少 " + text);
+  }
+  const sqlPath = path.join(HERE, "sql", "cross-company-worklogs-v1.sql");
+  if (!fs.existsSync(sqlPath)) throw new Error("缺少跨公司工时 SQL");
+  const sql = fs.readFileSync(sqlPath, "utf8");
+  for (const text of [
+    "enterprise_id uuid", "_worklog_scope", "start_work(", "p_enterprise uuid default null",
+    "end_work(", "p_enterprise uuid default null", "not an enterprise member",
+  ]) {
+    if (!sql.includes(text)) throw new Error("跨公司 SQL 缺少 " + text);
+  }
+  if (!/^[\x00-\x7F]*$/.test(sql)) throw new Error("跨公司 SQL 必须保持 ASCII");
+});
+
+test("应用内自动更新：下载、校验、安装和兜底完整接线", () => {
+  const update = fs.readFileSync(path.join(HERE, "update.js"), "utf8");
+  for (const text of [
+    "appUpdatePlugin", "expectedSha256", "updateProgress",
+    "install_permission_required", "openInstallSettings",
+    "openAppUpdateInBrowser", "showUpdatePrompt",
+    "APP_UPDATE_API_URL", "fetchUpdateManifest", "releaseManifest",
+  ]) {
+    if (!update.includes(text)) throw new Error("update.js 缺少 " + text);
+  }
+  const pluginPath = path.join(HERE, "android", "app", "src", "main",
+    "java", "com", "cj", "projectrecorder", "AppUpdatePlugin.java");
+  if (!fs.existsSync(pluginPath)) throw new Error("缺少 AppUpdatePlugin.java");
+  const plugin = fs.readFileSync(pluginPath, "utf8");
+  for (const text of [
+    '@CapacitorPlugin(name = "AppUpdate")',
+    "canRequestPackageInstalls", "FileProvider.getUriForFile",
+    "MessageDigest.getInstance(\"SHA-256\")", "notifyListeners",
+  ]) {
+    if (!plugin.includes(text)) throw new Error("AppUpdatePlugin 缺少 " + text);
+  }
+  const main = fs.readFileSync(path.join(HERE, "android", "app", "src", "main",
+    "java", "com", "cj", "projectrecorder", "MainActivity.java"), "utf8");
+  if (!main.includes("registerPlugin(AppUpdatePlugin.class)")) {
+    throw new Error("MainActivity 没有注册 AppUpdatePlugin");
+  }
+  const manifest = fs.readFileSync(path.join(HERE, "android", "app", "src",
+    "main", "AndroidManifest.xml"), "utf8");
+  if (!manifest.includes("REQUEST_INSTALL_PACKAGES")) {
+    throw new Error("AndroidManifest 缺少 REQUEST_INSTALL_PACKAGES");
+  }
+  if (!fs.existsSync(path.join(HERE, "seal-release.js"))) {
+    throw new Error("缺少 seal-release.js");
   }
 });
 

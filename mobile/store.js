@@ -17,6 +17,8 @@
 "use strict";
 
 const DB_KEY = "pr_database_v1";
+const DB_STORAGE_PREFIX = "pr_database_account_v2:";
+const DB_BACKUP_PREFIX = "pr_database_backup_v3:";
 const SETTINGS_KEY = "pr_settings_v1";
 
 /* ---------------------------------------------------------- 空库结构 */
@@ -138,8 +140,24 @@ function emptyDatabase() {
        不进云、不同步、不出现在任何提示文字里。 */
     savedAccounts: [],
 
+    /* v2 database scope. Account databases are stored under separate keys.
+       Company-scoped cloud caches are cleared when the active company changes. */
+    storage_version: 2,
+    account_scope_id: null,
+    company_scope_id: null,
+
     /* 待上传的变更队列。没网时攒着，联网后按顺序补传。 */
     syncQueue: [],
+
+    /* 云端比本机新的冲突。保留双方快照，不静默覆盖。 */
+    syncConflicts: [],
+
+    /* 工时经营标签走独立 RPC；等对应 worklogs 行上传成功后再提交。 */
+    dimensionQueue: [],
+
+    /* 本地手工工时先迁移为云端 UUID，再提交经营标签。
+       数字 id 只在本机有意义，不能直接发给 uuid 列。 */
+    worklogMigrationQueue: [],
 
     /* 各表最后一次成功拉取的时间，用来做增量拉取。
        没有它就只能每次全量拉，数据一多就慢。 */
@@ -153,10 +171,30 @@ function emptyDatabase() {
     /* 最近一次从云端取到的企业身份快照。
        离线时仍能显示上次确认过的身份和权限。 */
     identity: null,
+    organizationStatus: { status: "unknown", message: "", at: 0 },
+    clientProtocol: { protocol_version: null, minimum_protocol_version: 2, checked_at: 0 },
+    shareholderMeetings: { data: null, at: 0, error: "" },
 
     /* 企业积分快照。余额、季度池和流水都来自 get_point_state，
        离线时继续显示最后一次确认过的值。 */
     pointState: { balance: 0, pool: null, ledger: [], at: 0 },
+
+    /* 经营决策中心最近一次服务端快照。没有数据时保持空数组，
+       绝不在客户端伪造决策或审批。 */
+    decisionCenter: { decisions: [], approvals: [], members: [], at: 0 },
+
+    /* 管理经营摘要与员工自己的绩效依据。敏感数据只保存在本机缓存，
+       仍由服务端 RPC 决定是否能读取。 */
+    operations: { projects: [], capacity_gaps: [], performance: [],
+                  worklog_summary: {}, capacity_demands: [], skills: [],
+                  collection_alerts: [], members: [], security_audit: [],
+                  access: {}, at: 0 },
+    myPerformance: { items: [], at: 0 },
+    execution: { acceptance: [], dependencies: [], handoffs: [],
+                  changes: [], tasks: [], projects: [], members: [],
+                  access: {}, at: 0 },
+    intake: { myRequests: [], requests: [], forms: [], members: [],
+              projects: [], tasks: [], emailAliases: [], settings: {}, access: {}, at: 0 },
 
     /* 简单模式默认开启；只有具备管理、财务、审计或治理权限的人
        才能切到 advanced。服务端仍会独立校验。 */
@@ -215,6 +253,7 @@ function emptyDatabase() {
 }
 
 let DB = null;
+let currentDatabaseKey = DB_KEY;
 
 /* ---------------------------------------------------------- 时间工具 */
 function nowISO() {
@@ -231,15 +270,26 @@ function todayISO() {
 }
 
 /* ---------------------------------------------------------- 存取 */
-function loadAll() {
-  let raw = null;
+function accountDatabaseKey(accountId) {
+  const id = String(accountId || "").trim();
+  return id ? DB_STORAGE_PREFIX + encodeURIComponent(id) : DB_KEY;
+}
+
+function activeDatabaseKey() {
+  return currentDatabaseKey || DB_KEY;
+}
+
+function readDatabaseRaw(storageKey) {
   try {
-    raw = localStorage.getItem(DB_KEY);
+    return localStorage.getItem(storageKey || activeDatabaseKey());
   } catch (error) {
-    // 隐私模式或存储被禁时 localStorage 会抛异常。
-    // 这时程序仍要能用，只是关掉页面数据就没了——必须让用户知道。
     throw new Error("浏览器不允许本地存储，数据无法保存：" + error.message);
   }
+}
+
+function loadAll(storageKey) {
+  if (storageKey) currentDatabaseKey = storageKey;
+  const raw = readDatabaseRaw();
   if (!raw) return emptyDatabase();
   let parsed;
   try {
@@ -247,13 +297,19 @@ function loadAll() {
   } catch (error) {
     throw new Error("本地数据损坏，无法解析：" + error.message);
   }
-  return migrate(parsed);
+  const data = migrate(parsed);
+  if (currentDatabaseKey !== DB_KEY && !data.account_scope_id) {
+    data.account_scope_id = decodeURIComponent(
+      currentDatabaseKey.slice(DB_STORAGE_PREFIX.length));
+  }
+  return data;
 }
 
 function saveAll() {
   DB.updated_at = nowISO();
+  DB.storage_version = 2;
   try {
-    localStorage.setItem(DB_KEY, JSON.stringify(DB));
+    localStorage.setItem(activeDatabaseKey(), JSON.stringify(DB));
   } catch (error) {
     // 超容量是最可能的失败原因，提示要说清
     throw new Error(
@@ -266,6 +322,264 @@ function saveAll() {
 /* 让调用方读起来像「保存」这个动作，而不是写文件 */
 function _save() { saveAll(); }
 
+/* Switch to the account-owned database before any account data is rendered.
+   The previous database is written first, including its pending queue. */
+function activateAccountDatabase(accountId) {
+  const id = String(accountId || "").trim();
+  if (!id) throw new Error("无法切换数据库：账号 ID 为空");
+  if (DB && currentDatabaseKey === accountDatabaseKey(id)
+      && String(DB.account_scope_id || "") === id) return DB;
+
+  if (DB) saveAll();
+  const key = accountDatabaseKey(id);
+  const exists = !!readDatabaseRaw(key);
+  currentDatabaseKey = key;
+  DB = loadAll(key);
+  DB.account_scope_id = id;
+  saveSetting("last_account_id", id);
+  if (!exists) saveAll();
+  return DB;
+}
+
+/* A fresh account database is created only after the account ID is known. */
+function ensureAccountDatabase(accountId) {
+  const id = String(accountId || "").trim();
+  if (!id) throw new Error("无法创建数据库：账号 ID 为空");
+  const key = accountDatabaseKey(id);
+  const exists = !!readDatabaseRaw(key);
+  if (!exists) {
+    if (DB) saveAll();
+    currentDatabaseKey = key;
+    DB = emptyDatabase();
+    DB.account_scope_id = id;
+    saveSetting("last_account_id", id);
+    saveAll();
+  } else if (!DB || currentDatabaseKey !== key) {
+    activateAccountDatabase(id);
+  }
+  return { created: !exists, database: DB };
+}
+
+function databaseMeaningful(data) {
+  if (!data || typeof data !== "object") return false;
+  return ["projects", "steps", "employees", "worklogs", "assignments",
+          "assessments", "metrics", "sessions", "habits", "habitLogs",
+          "tasks", "taskLogs", "remoteWorklogs", "staffAccounts",
+          "syncQueue", "dimensionQueue", "worklogMigrationQueue"]
+    .some(key => Array.isArray(data[key]) && data[key].length > 0);
+}
+
+function backupCurrentDatabase(reason) {
+  const raw = readDatabaseRaw();
+  if (!raw) return null;
+  const stamp = nowISO().replace(/[-: ]/g, "");
+  const account = DB && DB.account_scope_id ? DB.account_scope_id : "legacy";
+  const suffix = Math.random().toString(36).slice(2, 6);
+  const key = DB_BACKUP_PREFIX + stamp + ":" + suffix + ":" + encodeURIComponent(account);
+  localStorage.setItem(key, raw);
+  const index = getSetting("database_backup_index", []);
+  const rows = Array.isArray(index) ? index : [];
+  rows.unshift({
+    key: key,
+    at: nowISO(),
+    reason: String(reason || "manual"),
+    account_id: DB && DB.account_scope_id || null,
+    bytes: raw.length,
+  });
+  saveSetting("database_backup_index", rows.slice(0, 20));
+  pruneDatabaseBackups(3);
+  return key;
+}
+
+function databaseBackups() {
+  const rows = getSetting("database_backup_index", []);
+  return Array.isArray(rows) ? rows.slice() : [];
+}
+
+function pruneDatabaseBackups(keep) {
+  const max = Math.max(1, Number(keep) || 3);
+  const rows = databaseBackups();
+  const remove = rows.slice(max);
+  const remain = rows.slice(0, max);
+  remove.forEach(row => {
+    try { localStorage.removeItem(row.key); } catch (error) {}
+  });
+  saveSetting("database_backup_index", remain);
+  return remain;
+}
+
+function legacyDatabaseSnapshot() {
+  const raw = readDatabaseRaw(DB_KEY);
+  if (!raw) return null;
+  try {
+    const data = migrate(JSON.parse(raw));
+    return databaseMeaningful(data) ? data : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function legacyDataSummary(data) {
+  const source = data || legacyDatabaseSnapshot();
+  if (!source) return { total: 0 };
+  const fields = ["projects", "steps", "employees", "worklogs", "tasks",
+                  "habitLogs", "syncQueue"];
+  const summary = {};
+  let total = 0;
+  fields.forEach(key => {
+    const count = Array.isArray(source[key]) ? source[key].length : 0;
+    summary[key] = count;
+    total += count;
+  });
+  summary.total = total;
+  return summary;
+}
+
+function markLegacyBackup(reason) {
+  const raw = readDatabaseRaw(DB_KEY);
+  if (!raw) return null;
+  const stamp = nowISO().replace(/[-: ]/g, "");
+  const suffix = Math.random().toString(36).slice(2, 6);
+  const key = DB_BACKUP_PREFIX + stamp + ":" + suffix + ":legacy";
+  localStorage.setItem(key, raw);
+  const index = getSetting("database_backup_index", []);
+  const rows = Array.isArray(index) ? index : [];
+  rows.unshift({ key: key, at: nowISO(), reason: reason || "legacy", account_id: null, bytes: raw.length });
+  saveSetting("database_backup_index", rows.slice(0, 20));
+  pruneDatabaseBackups(3);
+  return key;
+}
+
+/* Explicit ownership claim. Queues from the legacy database are not activated:
+   old pending operations must not be attributed to a new account. */
+function claimLegacyDataForCurrentAccount() {
+  if (!DB || !DB.account_scope_id) throw new Error("请先登录再确认旧数据归属");
+  const legacy = legacyDatabaseSnapshot();
+  if (!legacy) return false;
+  markLegacyBackup("legacy-claim");
+  const accountId = DB.account_scope_id;
+  const arrays = ["projects", "steps", "employees", "worklogs", "assignments",
+                  "assessments", "metrics", "sessions", "habits", "habitLogs",
+                  "tasks", "taskLogs", "remoteWorklogs", "staffAccounts",
+                  "meritLedger", "workSessions", "rewards", "redemptions", "leaves"];
+  arrays.forEach(key => {
+    if (!Array.isArray(legacy[key])) return;
+    if (!Array.isArray(DB[key])) DB[key] = [];
+    const seen = new Set(DB[key].map(item => String(item && item.id)));
+    legacy[key].forEach(item => {
+      if (!item || !item.id || seen.has(String(item.id))) return;
+      const row = Object.assign({}, item, { owner_account_id: accountId });
+      DB[key].push(row);
+      seen.add(String(row.id));
+    });
+  });
+  saveSetting("legacy_data_claim", {
+    status: "claimed",
+    account_id: accountId,
+    claimed_at: nowISO(),
+  });
+  saveAll();
+  return true;
+}
+
+function archiveLegacyDataClaim() {
+  markLegacyBackup("legacy-archive");
+  saveSetting("legacy_data_claim", { status: "archived", at: nowISO() });
+}
+
+function deferLegacyDataClaim(accountId) {
+  saveSetting("legacy_data_claim", {
+    status: "pending",
+    account_id: String(accountId || ""),
+    deferred_at: nowISO(),
+  });
+}
+
+function updateCompanyScope(companyId) {
+  const next = String(companyId || "");
+  const current = String(DB && DB.company_scope_id || "");
+  if (current === next) return false;
+  if (current && next) clearCompanyScopedCache();
+  DB.company_scope_id = next || null;
+  saveAll();
+  return true;
+}
+
+/* Clear cloud snapshots when the active company changes. Pending queues stay
+   in the account database and are intentionally untouched. */
+function clearCompanyScopedCache() {
+  if (!DB) return;
+  DB.identity = null;
+  DB.tasks = [];
+  DB.taskLogs = [];
+  DB.taskRequests = [];
+  DB.remoteWorklogs = [];
+  DB.meritLedger = [];
+  DB.workSessions = [];
+  DB.rewards = [];
+  DB.redemptions = [];
+  DB.leaves = [];
+  DB.staffAccounts = [];
+  DB.notifications = [];
+  DB.pointState = { balance: 0, pool: null, ledger: [], at: 0 };
+  DB.decisionCenter = { decisions: [], approvals: [], members: [], at: 0 };
+  DB.operations = { projects: [], capacity_gaps: [], performance: [],
+                    worklog_summary: {}, capacity_demands: [], skills: [],
+                    collection_alerts: [], members: [], security_audit: [],
+                    access: {}, at: 0 };
+  DB.myPerformance = { items: [], at: 0 };
+  DB.execution = { acceptance: [], dependencies: [], handoffs: [], changes: [],
+                   tasks: [], projects: [], members: [], access: {}, at: 0 };
+  DB.intake = { myRequests: [], requests: [], forms: [], members: [],
+                projects: [], tasks: [], emailAliases: [], settings: {},
+                access: {}, at: 0 };
+  DB.company_scope_id = null;
+  DB.syncCursor = {};
+  DB.notifyCursor = {};
+  DB.pullError = "";
+  DB.identityError = "";
+  DB.lastSync = { at: "", ok: true, pending: 0, message: "" };
+  saveAll();
+}
+
+
+function localSyncDiagnostics() {
+  const queue = Array.isArray(DB && DB.syncQueue) ? DB.syncQueue : [];
+  const failed = queue.filter(item => item.lastError);
+  const backupRows = databaseBackups();
+  let bytes = 0;
+  try {
+    const raw = readDatabaseRaw();
+    bytes = raw ? raw.length : 0;
+  } catch (error) {}
+  const legacy = legacyDatabaseSnapshot();
+  const legacyState = getSetting("legacy_data_claim", {});
+  return {
+    account_id: DB && DB.account_scope_id || null,
+    company_id: DB && DB.company_scope_id || null,
+    database_key: activeDatabaseKey(),
+    pending: typeof pendingCount === "function" ? pendingCount() : queue.length,
+    failed: failed.length,
+    conflicts: Array.isArray(DB && DB.syncConflicts)
+      ? DB.syncConflicts.filter(item => !item.resolved).length : 0,
+    conflict_items: Array.isArray(DB && DB.syncConflicts)
+      ? DB.syncConflicts.filter(item => !item.resolved).slice(0, 5)
+      : [],
+    failures: failed.slice(0, 5).map(item => ({
+      table: item.table,
+      key: item.key,
+      error: item.lastError,
+    })),
+    lastSync: DB && DB.lastSync || null,
+    pullError: DB && DB.pullError || "",
+    backup_count: backupRows.length,
+    last_backup: backupRows[0] || null,
+    bytes: bytes,
+    legacy_available: !!legacy && (!legacyState || legacyState.status !== "claimed"),
+    legacy_summary: legacy ? legacyDataSummary(legacy) : { total: 0 },
+  };
+}
+
 /* ---------------------------------------------------------- 版本升级 */
 function migrate(data) {
   // 每加一个字段都在这里补默认值，否则老数据读进来会 undefined
@@ -276,11 +590,43 @@ function migrate(data) {
     { balance: 0, pool: null, ledger: [], at: 0 }, merged.pointState || {}
   );
   if (!Array.isArray(merged.pointState.ledger)) merged.pointState.ledger = [];
+  merged.decisionCenter = Object.assign(
+    { decisions: [], approvals: [], members: [], at: 0 },
+    merged.decisionCenter || {}
+  );
+  merged.operations = Object.assign(
+    { projects: [], capacity_gaps: [], performance: [],
+      worklog_summary: {}, capacity_demands: [], skills: [],
+      collection_alerts: [], members: [], security_audit: [],
+      access: {}, at: 0 },
+    merged.operations || {}
+  );
+  merged.myPerformance = Object.assign(
+    { items: [], at: 0 }, merged.myPerformance || {}
+  );
+  merged.organizationStatus = Object.assign(
+    { status: "unknown", message: "", at: 0 },
+    merged.organizationStatus || {}
+  );
+  merged.clientProtocol = Object.assign(
+    { protocol_version: null, minimum_protocol_version: 2, checked_at: 0 },
+    merged.clientProtocol || {}
+  );
+  merged.execution = Object.assign(
+    { acceptance: [], dependencies: [], handoffs: [], changes: [],
+      tasks: [], projects: [], members: [], access: {}, at: 0 },
+    merged.execution || {}
+  );
+  ["decisions", "approvals", "members"].forEach(key => {
+    if (!Array.isArray(merged.decisionCenter[key])) {
+      merged.decisionCenter[key] = [];
+    }
+  });
   if (merged.uiMode !== "advanced") merged.uiMode = "simple";
   ["projects", "steps", "employees", "worklogs", "assignments",
    "assessments", "metrics", "sessions", "habits", "habitLogs",
    "tasks", "taskLogs", "remoteWorklogs", "staffAccounts", "syncQueue",
-   "notifications", "meritLedger",
+   "syncConflicts", "dimensionQueue", "worklogMigrationQueue", "notifications", "meritLedger",
    "workSessions", "rewards", "redemptions", "leaves"]
     .forEach(key => {
       if (!Array.isArray(merged[key])) merged[key] = [];
@@ -361,6 +707,64 @@ const PROJECT_FIELDS = [
   "start_date", "due_date", "budget", "cost", "progress", "note",
 ];
 
+function projectCloudPayload(project) {
+  return {
+    remote_id: project.remote_id || "",
+    remote_version: project.remote_version || null,
+    name: project.name || "",
+    owner: project.owner || "",
+    client: project.client || "",
+    status: project.status || "进行中",
+    priority: project.priority || "中",
+    start_date: project.start_date || "",
+    due_date: project.due_date || "",
+    budget: num(project.budget),
+    cost: num(project.cost),
+    progress: clamp(num(project.progress), 0, 100),
+    note: project.note || "",
+  };
+}
+
+function stepCloudPayload(step) {
+  return {
+    remote_id: step.remote_id || "",
+    remote_version: step.remote_version || null,
+    project_id: step.project_id,
+    seq: num(step.seq),
+    name: step.name || "",
+    owner: step.owner || "",
+    status: step.status || "未开始",
+    start_date: step.start_date || "",
+    due_date: step.due_date || "",
+    progress: clamp(num(step.progress), 0, 100),
+    note: step.note || "",
+  };
+}
+
+function dropQueuedSync(table, key) {
+  if (!Array.isArray(DB.syncQueue)) return;
+  DB.syncQueue = DB.syncQueue.filter(item =>
+    item.table !== table || String(item.key) !== String(key));
+}
+
+function queueProjectSync(project, op) {
+  if (!DB.profile || !project || typeof queueChange !== "function") return;
+  if (op === "delete" && !project.remote_id) {
+    dropQueuedSync("projects", project.id);
+    return;
+  }
+  queueChange("projects", op || "upsert", project.id, projectCloudPayload(project));
+}
+
+function queueStepSync(step, op) {
+  if (!DB.profile || !step || typeof queueChange !== "function") return;
+  if (op === "delete" && !step.remote_id) {
+    dropQueuedSync("project_steps", step.id);
+    return;
+  }
+  queueChange("project_steps", op || "upsert", step.id, stepCloudPayload(step));
+}
+
 function addProject(data) {
   const project = {
     id: nextId("project"),
@@ -381,6 +785,7 @@ function addProject(data) {
   if (!project.name) throw new Error("项目名称不能为空。");
   DB.projects.push(project);
   _save();
+  queueProjectSync(project, "upsert");
   return project;
 }
 
@@ -399,6 +804,7 @@ function updateProject(id, data) {
   });
   project.updated_at = nowISO();
   _save();
+  queueProjectSync(project, "upsert");
   return project;
 }
 
@@ -408,7 +814,8 @@ function getProject(id) {
 
 function deleteProject(id) {
   const pid = Number(id);
-  // 级联删掉从属于它的东西。工时也一起删——
+  const project = getProject(pid);
+  // 级联删掉从属于它的东西。工时也一起删
   // 留着「项目已删但工时还在」会让负荷统计出现找不到项目的记录。
   DB.steps = DB.steps.filter(item => item.project_id !== pid);
   DB.worklogs = DB.worklogs.filter(item => item.project_id !== pid);
@@ -417,6 +824,7 @@ function deleteProject(id) {
   DB.metrics = DB.metrics.filter(item => item.project_id !== pid);
   DB.projects = DB.projects.filter(item => item.id !== pid);
   _save();
+  queueProjectSync(project, "delete");
 }
 
 function projectSteps(projectId) {
@@ -447,6 +855,7 @@ function addStep(projectId, data) {
   if (!step.name) throw new Error("步骤名称不能为空。");
   DB.steps.push(step);
   _save();
+  queueStepSync(step, "upsert");
   return step;
 }
 
@@ -461,22 +870,22 @@ function updateStep(id, data) {
   });
   if (!String(step.name).trim()) throw new Error("步骤名称不能为空。");
   _save();
+  queueStepSync(step, "upsert");
   return step;
 }
 
 function deleteStep(id) {
   const sid = Number(id);
-  // 工时不跟着删，只是把关联去掉——那条工时是真干过的活，
+  const step = DB.steps.find(item => item.id === sid) || null;
+  // 工时不跟着删，只是把关联去掉那条工时是真干过的活，
   // 不该因为步骤被删就消失（和电脑端 ON DELETE SET NULL 一致）
   DB.worklogs.forEach(item => { if (item.step_id === sid) item.step_id = null; });
   DB.assignments.forEach(item => { if (item.step_id === sid) item.step_id = null; });
   DB.steps = DB.steps.filter(item => item.id !== sid);
   _save();
+  queueStepSync(step, "delete");
 }
 
-/* ============================================================
-   员工
-   ============================================================ */
 function addEmployee(data) {
   const employee = {
     id: nextId("employee"),
@@ -513,6 +922,33 @@ function getEmployee(id) {
   return DB.employees.find(item => item.id === Number(id)) || null;
 }
 
+/* 找一个"干活的人"：先查本机员工，再查公司成员。
+   跨公司加入的老板号没有本机员工记录，只有 enterprise_members 里的 profile。 */
+function resolveWorker(id) {
+  const key = String(id || "").trim();
+  if (!key) return null;
+  const employee = DB.employees.find(item => String(item.id) === key) || null;
+  if (employee) {
+    return {
+      source: "local",
+      id: employee.id,
+      profile_id: employee.profile_id || null,
+      name: employee.name,
+    };
+  }
+  const member = (DB.identity && Array.isArray(DB.identity.members)
+    ? DB.identity.members : []).find(item => String(item.profile_id) === key) || null;
+  if (member) {
+    return {
+      source: "member",
+      id: member.profile_id,
+      profile_id: member.profile_id,
+      name: member.name || "未命名成员",
+    };
+  }
+  return null;
+}
+
 function employeeByName(name) {
   return DB.employees.find(item => item.name === name) || null;
 }
@@ -537,8 +973,8 @@ function deleteEmployee(id) {
    ============================================================ */
 function addWorklog(data, options) {
   const opts = options || {};
-  const employee = getEmployee(data.employee_id);
-  if (!employee) throw new Error("先选一个人。");
+  const worker = resolveWorker(data.employee_id);
+  if (!worker) throw new Error("先选一个人。");
   const hours = num(data.hours);
   if (hours <= 0) throw new Error("工时要大于 0。");
   if (hours > 24) throw new Error("一天不可能超过 24 小时。");
@@ -569,9 +1005,20 @@ function addWorklog(data, options) {
     if (!step || step.project_id !== projectId) stepId = null;
   }
 
+  const ownerProfileId = typeof currentEnterpriseOwnerId === "function"
+    && currentEnterpriseOwnerId()
+    ? currentEnterpriseOwnerId()
+    : (DB.profile
+      ? (DB.profile.role === "boss"
+        ? String(DB.profile.id || "")
+        : String(DB.profile.boss_id || ""))
+      : "");
   const log = {
     id: nextId("worklog"),
-    employee_id: employee.id,
+    owner_profile_id: ownerProfileId,
+    employee_id: worker.id,
+    enterprise_id: typeof currentEnterpriseId === "function"
+      ? currentEnterpriseId() : "",
     project_id: projectId,
     step_id: stepId,
     work_date: date,
@@ -579,6 +1026,13 @@ function addWorklog(data, options) {
     content: String(data.content || ""),
     // timer / manual：电脑端靠这个区分「真实计时」和「手工补录」
     source: data.source === "timer" ? "timer" : "manual",
+    billable: data.billable !== false,
+    overtime: !!data.overtime,
+    work_kind: ["project", "presales", "internal"].indexOf(data.work_kind) !== -1
+      ? data.work_kind : "project",
+    rework: !!data.rework,
+    waiting: !!data.waiting,
+    travel: !!data.travel,
     created_at: nowISO(),
   };
   DB.worklogs.push(log);
@@ -587,20 +1041,24 @@ function addWorklog(data, options) {
 }
 
 function updateWorklog(id, data) {
-  const log = DB.worklogs.find(item => item.id === Number(id));
+  const local = DB.worklogs.find(item => String(item.id) === String(id));
+  const remote = (DB.remoteWorklogs || []).find(
+    item => String(item.id) === String(id));
+  const log = local || remote;
   if (!log) throw new Error("这条工时已经不存在了。");
-  if (data.hours !== undefined) {
+  const cloudOnly = !local;
+  if (!cloudOnly && data.hours !== undefined) {
     const hours = num(data.hours);
     if (hours <= 0 || hours > 24) throw new Error("工时要大于 0 且不超过 24。");
     log.hours = hours;
   }
-  if (data.work_date !== undefined) {
+  if (!cloudOnly && data.work_date !== undefined) {
     const date = String(data.work_date).trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("日期格式不对。");
     if (date > todayISO()) throw new Error("不能填未来的日期。");
     log.work_date = date;
   }
-  if (data.project_id !== undefined) {
+  if (!cloudOnly && data.project_id !== undefined) {
     log.project_id = data.project_id === "" || data.project_id === null
       ? null : Number(data.project_id);
     if (log.project_id !== null && !getProject(log.project_id)) {
@@ -612,16 +1070,25 @@ function updateWorklog(id, data) {
       if (!step || step.project_id !== log.project_id) log.step_id = null;
     }
   }
-  if (data.step_id !== undefined) {
+  if (!cloudOnly && data.step_id !== undefined) {
     log.step_id = data.step_id === "" || data.step_id === null
       ? null : Number(data.step_id);
   }
-  if (data.employee_id !== undefined) {
-    const employee = getEmployee(data.employee_id);
-    if (!employee) throw new Error("这个人已经不在名单里了。");
-    log.employee_id = employee.id;
+  if (!cloudOnly && data.employee_id !== undefined) {
+    const worker = resolveWorker(data.employee_id);
+    if (!worker) throw new Error("这个人已经不在名单里了。");
+    log.employee_id = worker.id;
   }
-  if (data.content !== undefined) log.content = String(data.content);
+  if (!cloudOnly && data.content !== undefined) log.content = String(data.content);
+  if (data.billable !== undefined) log.billable = data.billable !== false;
+  if (data.overtime !== undefined) log.overtime = !!data.overtime;
+  if (data.work_kind !== undefined) {
+    log.work_kind = ["project", "presales", "internal"].indexOf(data.work_kind) !== -1
+      ? data.work_kind : "project";
+  }
+  if (data.rework !== undefined) log.rework = !!data.rework;
+  if (data.waiting !== undefined) log.waiting = !!data.waiting;
+  if (data.travel !== undefined) log.travel = !!data.travel;
   log.updated_at = nowISO();
   _save();
   return log;
@@ -629,6 +1096,9 @@ function updateWorklog(id, data) {
 
 function deleteWorklog(id) {
   DB.worklogs = DB.worklogs.filter(item => item.id !== Number(id));
+  if (typeof removeQueuedWorklogMigration === "function") {
+    removeQueuedWorklogMigration(id);
+  }
   _save();
 }
 
@@ -680,8 +1150,10 @@ function worklogsFor(options) {
     rows = rows.filter(item => String(item.employee_id) === wanted);
   }
   if (opts.project_id !== undefined && opts.project_id !== null) {
-    const wanted = String(opts.project_id);
-    rows = rows.filter(item => String(item.project_id) === wanted);
+    const project = typeof getProject === "function" ? getProject(opts.project_id) : null;
+    const wanted = new Set([String(opts.project_id)]);
+    if (project && project.remote_id) wanted.add(String(project.remote_id));
+    rows = rows.filter(item => wanted.has(String(item.project_id)));
   }
   if (opts.date_from) rows = rows.filter(item => item.work_date >= opts.date_from);
   if (opts.date_to) rows = rows.filter(item => item.work_date <= opts.date_to);
@@ -839,6 +1311,10 @@ function queueChange(table, op, key, payload) {
     op: op,
     key: String(key),
     payload: payload || {},
+    account_id: DB.account_scope_id || null,
+    enterprise_id: DB.company_scope_id
+      || (DB.identity && DB.identity.enterprise && DB.identity.enterprise.id)
+      || null,
     at: nowISO(),
   });
   _save();
@@ -847,7 +1323,10 @@ function queueChange(table, op, key, payload) {
 
 /* 队列里还有多少条待上传 */
 function pendingCount() {
-  return Array.isArray(DB.syncQueue) ? DB.syncQueue.length : 0;
+  return (Array.isArray(DB.syncQueue) ? DB.syncQueue.length : 0)
+    + (Array.isArray(DB.dimensionQueue) ? DB.dimensionQueue.length : 0)
+    + (Array.isArray(DB.worklogMigrationQueue)
+      ? DB.worklogMigrationQueue.length : 0);
 }
 
 /* 上传成功后清掉那些项。只删成功的，失败的留着下次重试。 */
@@ -855,6 +1334,14 @@ function clearQueueItems(ids) {
   if (!Array.isArray(DB.syncQueue)) return;
   const remove = ids.map(Number);
   DB.syncQueue = DB.syncQueue.filter(item => remove.indexOf(item.id) === -1);
+  _save();
+}
+
+function clearDimensionQueue(ids) {
+  if (!Array.isArray(DB.dimensionQueue)) return;
+  const remove = ids.map(String);
+  DB.dimensionQueue = DB.dimensionQueue.filter(
+    item => remove.indexOf(String(item.worklog_id)) === -1);
   _save();
 }
 
@@ -868,7 +1355,16 @@ function clearQueueItems(ids) {
    **notifyCursor 也一起清**：否则换了账号之后，
    新账号的事件时间戳比旧 cursor 早的会被当成"已经看过"而漏掉通知。 */
 function resetSyncState() {
-  DB.syncQueue = [];
+  /* Pending uploads belong to this account database. Never erase them on
+     login, logout, restart or account switching. */
+  DB.operations = { projects: [], capacity_gaps: [], performance: [],
+                    worklog_summary: {}, capacity_demands: [], skills: [],
+                    collection_alerts: [], members: [], security_audit: [],
+                    access: {}, at: 0 };
+  DB.myPerformance = { items: [], at: 0 };
+  DB.execution = { acceptance: [], dependencies: [], handoffs: [],
+                   changes: [], tasks: [], projects: [], members: [],
+                   access: {}, at: 0 };
   DB.syncCursor = {};
   DB.notifyCursor = {};
   DB.lastSync = { at: "", ok: true, pending: 0, message: "" };
@@ -1242,7 +1738,9 @@ function projectName(id) {
 
 function employeeName(id) {
   const employee = getEmployee(id);
-  return employee ? employee.name : "";
+  if (employee) return employee.name;
+  if (typeof employeeNameOf === "function") return employeeNameOf(id);
+  return "";
 }
 
 function stepName(id) {

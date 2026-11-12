@@ -3,14 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#45c4a8">
+<meta name="theme-color" content="#2b2148">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="项目记录器">
 <title>项目记录器</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=20261111-starry-v3">
 </head>
 <body>
+<div class="star-sky" aria-hidden="true">
+  <span class="sky-galaxy"></span>
+  <span class="sky-nebula"></span>
+  <span class="sky-ridge"></span>
+  <span class="sky-meteor sky-meteor-a"></span>
+  <span class="sky-meteor sky-meteor-b"></span>
+</div>
 
 <!-- ============================================================
      启动时如果用不了，这个横幅会显示出来。
@@ -24,9 +31,14 @@
      老用户升级后本机数据还在，不能被一个用不上的登录页挡住。 -->
 <section id="page-login" class="page hidden">
   <div class="body">
-    <div class="login-hero">
-      <img class="hero-art sticker" src="icons/09_暗中观察@hero.webp" alt="">
-      <h1>项目记录器</h1>
+    <div class="login-hero scene-card scene-login">
+      <div class="scene-card-copy">
+        <span class="scene-kicker">星图工作手账</span>
+        <h1>项目记录器</h1>
+        <p class="login-tagline">把今天要做的事，放回属于它的轨道。</p>
+        <div class="scene-constellation" aria-hidden="true"><i></i><i></i><i></i></div>
+      </div>
+      <img class="scene-card-art" src="icons/star/star_10_read.webp" alt="">
     </div>
 
     <div id="login-cloud"></div>
@@ -92,21 +104,31 @@
 <!-- ====================== 今日工位（简单模式） ====================== -->
 <section id="page-today" class="page hidden">
   <div class="topbar">
-    <div class="grow"><h1>今天</h1><div class="sub" id="today-sub"></div></div>
+    <div class="grow">
+      <span class="topbar-kicker">今日冒险手账</span>
+      <h1>今天</h1><div class="sub" id="today-sub"></div>
+    </div>
     <button class="icon-btn hidden" id="btn-mode-toggle" title="切换模式">⇄</button>
   </div>
   <div class="body">
+    <div id="today-scene"></div>
     <div class="identity-me-card" id="today-summary"></div>
-    <div class="section-head"><span>今日任务</span><span class="meta" id="today-count"></span></div>
+
+    <div class="section-head"><span>今日焦点</span><span class="meta" id="today-count"></span></div>
     <div id="today-task-list"></div>
     <div class="btn-row">
       <button class="btn ghost" id="btn-today-all-tasks"
               style="width:100%">查看全部任务</button>
     </div>
 
-    <div class="section-head"><span>积分与解锁</span><span class="meta" id="today-points"></span></div>
-    <div id="today-rewards"></div>
-    <div id="today-ledger"></div>
+    <div class="section-head"><span>待我处理</span><span class="meta" id="today-pending-count"></span></div>
+    <div id="today-pending-list"></div>
+
+    <div class="section-head"><span>正在工作</span><span class="meta" id="today-working-state"></span></div>
+    <div id="today-working"></div>
+
+    <div class="section-head"><span>公司动态</span><span class="meta" id="today-company-count"></span></div>
+    <div id="today-company-feed"></div>
     <button class="btn ghost" id="btn-today-community"
             style="width:100%;margin-top:10px">去知识星球</button>
   </div>
@@ -140,6 +162,7 @@
          而里面的「在管项目 3」和下面的列表是同一份信息。
          首屏要留给真正要看的项目列表。 -->
     <div id="dash-stats" class="summary"></div>
+    <div class="star-companion" id="star-companion"></div>
 
     <!-- **现在谁在干活 + 今日产出 + 待审批。**
 
@@ -197,7 +220,7 @@
 <section id="page-team" class="page hidden">
   <div class="topbar">
     <div class="grow"><h1>团队</h1><div class="sub" id="team-sub"></div></div>
-    <button class="icon-btn" id="btn-new-employee">+ 人</button>
+    <button class="icon-btn" id="btn-new-employee" title="邀请公司成员">+ 人</button>
   </div>
   <div class="body">
     <!-- 老板的两个管理入口。
@@ -369,9 +392,17 @@
       <span class="meta">身份决定可见功能</span></div>
     <div class="chips" id="identity-permissions"></div>
 
+    <div class="section-head"><span>组织与股权</span>
+      <span class="meta" id="organization-summary"></span></div>
+    <div id="identity-organization"></div>
+
     <div class="section-head"><span>成员与身份</span>
       <span class="meta" id="identity-member-count"></span></div>
     <div id="identity-members"></div>
+
+    <div class="section-head"><span>股东大会</span>
+      <span class="meta" id="identity-meeting-count"></span></div>
+    <div id="identity-meetings"></div>
 
     <div class="section-head"><span>股东表决</span>
       <span class="meta" id="identity-motion-count"></span></div>
@@ -391,31 +422,236 @@
   </div>
 </section>
 
+<!-- ====================== 我的公司 ====================== -->
+<section id="page-companies" class="page hidden">
+  <div class="topbar">
+    <div class="grow">
+      <h1>我的公司</h1>
+      <div class="sub" id="my-companies-sub">主公司与其他成员关系</div>
+    </div>
+    <button class="icon-btn" id="btn-my-companies-refresh" title="刷新">↻</button>
+  </div>
+  <div class="body">
+    <div class="scene-card scene-company">
+      <div class="scene-card-copy">
+        <span class="scene-kicker">组织星图</span>
+        <h2>找到你的公司轨道</h2>
+        <p>查看主公司、成员关系和当前组织，需要时再调整主公司。</p>
+      </div>
+      <img class="scene-card-art" src="icons/star/star_02_roger.webp" alt="">
+    </div>
+    <div id="my-company-invites"></div>
+    <div id="my-company-primary"></div>
+
+    <div class="section-head"><span>我加入的公司</span>
+      <span class="meta">主公司必须保留</span></div>
+    <div id="my-company-list"></div>
+
+    <div class="section-head"><span>公司成员</span>
+      <span class="meta" id="my-company-people-count"></span></div>
+    <div id="my-company-people"></div>
+
+    <div id="organization-health-section" class="hidden" style="margin-top:20px">
+      <div class="section-head">
+        <span>组织健康检查</span>
+        <div class="btn-row">
+          <button class="icon-btn" id="btn-org-repair" title="修复公司身份">修</button>
+          <button class="icon-btn" id="btn-org-health" title="检查组织健康">↻</button>
+        </div>
+      </div>
+      <div id="organization-health-result" class="meta">
+        检查公司成员、股份和同步状态。
+      </div>
+    </div>
+
+    <div class="community-note">
+      成员信息按权限分级显示。普通成员只看到角色、部门和职务；管理身份才显示账号、持股和成员状态。
+    </div>
+  </div>
+</section>
+
+<!-- ====================== 经营决策（高级管理） ====================== -->
+<section id="page-decisions" class="page hidden">
+  <div class="topbar">
+    <div class="grow">
+      <h1>经营决策</h1>
+      <div class="sub">先处理影响交付和金额最大的事项</div>
+    </div>
+    <button class="icon-btn" id="btn-decisions-refresh" title="刷新">↻</button>
+  </div>
+  <div class="body">
+    <div id="decision-summary" class="decision-summary"></div>
+    <div class="section-head"><span>决策队列</span>
+      <span class="meta">证据 · 影响 · 责任人 · 截止</span></div>
+    <div id="decision-list"></div>
+    <div class="section-head"><span>我的审批</span>
+      <span class="meta">统一收件箱</span></div>
+    <div id="approval-list"></div>
+  </div>
+</section>
+
+<!-- ====================== 经营摘要（高级管理） ====================== -->
+<section id="page-operations" class="page hidden">
+  <div class="topbar">
+    <div class="grow">
+      <h1>经营摘要</h1>
+      <div class="sub">合同、回款、毛利与未来能力缺口</div>
+    </div>
+    <button class="icon-btn" id="btn-operations-refresh" title="刷新">↻</button>
+  </div>
+  <div class="body">
+    <div id="operations-banner"></div>
+    <div id="operations-summary" class="decision-summary"></div>
+    <div id="operations-admin-actions" class="btn-row hidden">
+      <button class="btn ghost" id="btn-ops-skill">维护技能</button>
+      <button class="btn ghost" id="btn-ops-capacity">新增能力需求</button>
+      <button class="btn ghost" id="btn-ops-evidence">新建绩效证据</button>
+    </div>
+    <div class="section-head"><span>项目经营</span>
+      <span class="meta">合同 · 成本 · 毛利 · 回款</span></div>
+    <div id="operations-projects"></div>
+    <div class="section-head"><span>能力缺口</span>
+      <span class="meta">未来 2-4 周</span></div>
+    <div id="operations-capacity"></div>
+    <div class="section-head"><span>绩效证据</span>
+      <span class="meta">可追溯 · 不直接决定工资或晋升</span></div>
+    <div id="operations-performance"></div>
+    <div class="section-head"><span>工时经营维度</span>
+      <span class="meta">本期汇总</span></div>
+    <div id="operations-worklog"></div>
+  </div>
+</section>
+
+<!-- ====================== 执行追踪 ====================== -->
+<section id="page-execution" class="page hidden">
+  <div class="topbar">
+    <div class="grow">
+      <h1>执行追踪</h1>
+      <div class="sub">验收、依赖、交接和变更</div>
+    </div>
+    <button class="icon-btn" id="btn-execution-refresh" title="刷新">↻</button>
+  </div>
+  <div class="body">
+    <div id="execution-summary" class="decision-summary"></div>
+    <div id="execution-tools" class="btn-row">
+      <button class="btn ghost" id="btn-execution-submit">提交验收</button>
+      <button class="btn ghost" id="btn-execution-dependency">新增依赖</button>
+      <button class="btn ghost" id="btn-execution-handoff">发起交接</button>
+      <button class="btn ghost" id="btn-execution-change">发起变更</button>
+    </div>
+    <div class="section-head"><span>验收</span>
+      <span class="meta">标准 · 证据 · 独立验收</span></div>
+    <div id="execution-acceptance"></div>
+    <div class="section-head"><span>依赖影响</span>
+      <span class="meta">阻塞与下游日期</span></div>
+    <div id="execution-dependencies"></div>
+    <div class="section-head"><span>交接</span>
+      <span class="meta">接收方确认后才生效</span></div>
+    <div id="execution-handoffs"></div>
+    <div class="section-head"><span>变更</span>
+      <span class="meta">未批准不改原计划</span></div>
+    <div id="execution-changes"></div>
+  </div>
+</section>
+
+<!-- ====================== 工作入口 ====================== -->
+<section id="page-intake" class="page hidden">
+  <div class="topbar">
+    <div class="grow">
+      <h1>工作入口</h1>
+      <div class="sub">快速记录、公开表单、分诊与转入执行</div>
+    </div>
+    <button class="icon-btn" id="btn-intake-refresh" title="刷新">↻</button>
+  </div>
+  <div class="body">
+    <div id="intake-summary" class="decision-summary"></div>
+    <div class="btn-row">
+      <button class="btn" id="btn-intake-quick">快速记录</button>
+      <button class="btn ghost hidden" id="btn-intake-form">新建公开表单</button>
+      <button class="btn ghost hidden" id="btn-intake-settings">入口设置</button>
+      <button class="btn ghost hidden" id="btn-intake-email">新建邮件入口</button>
+    </div>
+    <div id="intake-forms-wrap" class="hidden">
+      <div class="section-head"><span>公开入口</span>
+        <span class="meta">链接 · 二维码 · 外部提交</span></div>
+      <div id="intake-forms"></div>
+      <div id="intake-email-aliases" class="meta"></div>
+    </div>
+    <div id="intake-management" class="hidden">
+      <div class="section-head"><span>待分诊队列</span>
+        <span class="meta">SLA · 负责人 · 优先级依据</span></div>
+      <div id="intake-requests"></div>
+    </div>
+    <div class="section-head"><span>我的需求</span>
+      <span class="meta">只显示公开进展</span></div>
+    <div id="intake-mine"></div>
+  </div>
+</section>
+
 <!-- ====================== 知识星球社区 ====================== -->
 <section id="page-community" class="page hidden">
   <div class="topbar">
     <div class="grow">
       <h1>知识星球</h1>
-      <div class="sub" id="community-sub">所有成员共享同一条消息流</div>
+      <div class="sub" id="community-sub">板块、讨论与伙伴经验都在这里</div>
     </div>
     <button class="icon-btn" id="btn-community-refresh" title="刷新">↻</button>
   </div>
   <div class="body">
+    <div class="planet-signal" aria-label="知识星球社区状态">
+      <div class="planet-orb" aria-hidden="true"><span>✦</span></div>
+      <div class="planet-signal-copy">
+        <span>伙伴分享站</span>
+        <b>每个成员都能看到，也都能发声</b>
+        <small>按板块讨论，提问、复盘、分享和必读知识都不再混成一条消息流。</small>
+      </div>
+      <img class="planet-signal-art" src="icons/star/star_09_music.webp" alt="">
+      <i>在线</i>
+    </div>
+
+    <div class="card community-toolbar">
+      <div class="community-search-row">
+        <input id="community-search" placeholder="搜索讨论、经验或问题"
+               autocomplete="off">
+        <button class="btn ghost" id="btn-community-search">搜索</button>
+      </div>
+      <div class="community-board-chips" id="community-boards"></div>
+      <div class="community-filter-row">
+        <button class="chip" id="btn-community-profile">我的社区身份</button>
+        <button class="chip" id="btn-community-bookmarks">只看收藏</button>
+        <button class="chip" id="btn-community-notifications">
+          通知 <span id="community-unread" class="community-unread">0</span>
+        </button>
+        <button class="chip hidden" id="btn-community-manage">管理板块</button>
+      </div>
+    </div>
+
+    <div id="community-notifications-panel" class="card hidden"></div>
+
     <div class="card community-composer">
       <div class="card-head">
-        <h3>发到星球</h3>
+        <h3>发布讨论</h3>
         <span class="meta" id="community-me">尚未登录</span>
       </div>
+      <label for="community-board-select">发布到</label>
+      <select id="community-board-select"></select>
       <div class="chips community-topics" id="community-topics"></div>
       <textarea id="community-input" maxlength="2000"
-        placeholder="写一条所有成员都能看到的消息。&#10;可以提问、分享经验、同步判断或发出一条灵感。"></textarea>
+        placeholder="把问题、经验或判断写清楚。&#10;需要全公司留下记录的内容，可以设为必读。"></textarea>
       <div class="row2">
         <div><label for="community-unlock-cost">解锁积分（0 = 免费）</label>
           <input id="community-unlock-cost" type="number" min="0" value="0"></div>
-        <label class="community-required">
-          <input id="community-required" type="checkbox">
-          设为必读
-        </label>
+        <div class="community-checks">
+          <label class="community-required">
+            <input id="community-required" type="checkbox"> 设为必读
+          </label>
+          <label class="community-required community-admin-only hidden">
+            <input id="community-pinned" type="checkbox"> 置顶
+          </label>
+          <label class="community-required community-admin-only hidden">
+            <input id="community-featured" type="checkbox"> 精选
+          </label>
+        </div>
       </div>
       <div class="community-compose-foot">
         <span class="meta" id="community-count">0 / 2000</span>
@@ -424,12 +660,16 @@
     </div>
 
     <div class="section-head">
-      <span>全员消息</span>
+      <span id="community-filter-label">最新讨论</span>
       <span class="meta" id="community-status">登录后加载</span>
     </div>
     <div id="community-feed"></div>
+    <div id="community-load-more-wrap" class="community-load-more hidden">
+      <button class="btn ghost" id="btn-community-load-more">加载更多</button>
+    </div>
     <div class="community-note">
-      社区消息对全部成员可见。请勿发送密码、密钥和他人隐私。
+      默认实名展示，公共板块全员可参与；敏感板块按身份权限隔离。
+      请勿发送密码、密钥、工资、客户隐私或未公开财务数据。
     </div>
   </div>
 </section>
@@ -497,6 +737,10 @@
       <button class="btn ghost" id="btn-me-login">改登录名</button>
     </div>
 
+    <!-- 基础版也能查看公司关系并调整主公司，不要求先进入高级模式。 -->
+    <button class="btn ghost hidden" id="btn-me-companies"
+            style="width:100%;margin-top:8px">我的公司</button>
+
     <!-- 只有老板需要：切主题、管员工。
          **「云服务设置」不在这里**——服务器已经配好了，
          摆出来别人看不懂（"云服务"是什么？）。
@@ -515,6 +759,27 @@
     <button class="btn ghost" id="btn-me-leave"
             style="width:100%;margin-top:8px">我要请假</button>
 
+    <!-- 自己的绩效依据只在用户主动点开时加载，避免把敏感内容塞进简单模式首屏。 -->
+    <button class="btn ghost" id="btn-my-performance"
+            style="width:100%;margin-top:8px">查看我的绩效依据</button>
+    <div id="my-performance" class="hidden"></div>
+
+    <div class="section-head"><span>应用版本</span>
+      <span class="meta">应用内下载 · 系统安装器</span></div>
+    <div class="card">
+      <div id="app-update-card"></div>
+      <button class="btn ghost" id="btn-check-update"
+              style="width:100%;margin-top:10px">检查更新</button>
+    </div>
+
+    <div class="section-head"><span>系统诊断</span>
+      <span class="meta">账号 · 数据库 · 功能迁移</span></div>
+    <div class="card">
+      <div id="system-health-result" class="meta">运行诊断可检查当前数据库和功能是否完整。</div>
+      <button class="btn ghost" id="btn-system-diagnose"
+              style="width:100%;margin-top:10px">运行诊断</button>
+    </div>
+
     <button class="btn danger" id="btn-me-logout"
             style="width:100%;margin-top:16px">退出登录</button>
 
@@ -532,19 +797,19 @@
      员工只有两个入口——给他看一堆用不上的按钮只会让人困惑。 -->
 <nav id="nav">
   <span id="nav-simple" class="nav-group">
-    <button data-page="today" class="on"><b>今天</b></button>
-    <button data-page="community"><b>星球</b></button>
-    <button data-page="me"><b>我的</b></button>
+    <button data-page="today" data-icon="◉" class="on"><b>今日</b></button>
+    <button data-page="tasks" data-icon="▣"><b>任务</b></button>
+    <button data-page="community" data-icon="✦"><b>星球</b></button>
+    <button data-page="me" data-icon="◇"><b>我的</b></button>
   </span>
   <span id="nav-advanced" class="nav-group hidden">
-    <button data-page="dash"><b>看板</b></button>
-    <button data-page="team"><b>团队</b></button>
-    <button data-page="assist"><b>助手</b></button>
-    <button data-page="identity"><b>治理</b></button>
-    <button data-page="community"><b>星球</b></button>
-    <button data-page="today"><b>今天</b></button>
-    <button data-page="me"><b>我的</b></button>
+    <button data-page="decisions" data-icon="⚖"><b>决策</b></button>
+    <button data-page="operations" data-icon="◫" id="nav-operations"><b>经营</b></button>
+    <button data-page="intake" data-icon="↗"><b>需求</b></button>
+    <button data-page="execution" data-icon="⚔" id="nav-execution"><b>执行</b></button>
+    <button data-page="more" data-icon="⋯" id="nav-more-advanced"><b>更多</b></button>
   </span>
+  <span id="nav-scroll-cue" class="nav-scroll-cue hidden" aria-hidden="true">›</span>
 </nav>
 
 <!-- ====================== 弹层：表单 / 菜单 ====================== -->
@@ -560,6 +825,7 @@
   </div>
 </div>
 
+<div id="update-prompt" class="update-prompt hidden"></div>
 <div id="toast" class="toast hidden"></div>
 
 <!-- ============================================================
@@ -574,6 +840,7 @@
        7. app.js              —— 主程序，最后加载并启动
      ============================================================ -->
 <script src="vendor/supabase.js"></script>
+<script src="vendor/qrcode.min.js"></script>
 <script>
   /* 云库没加载上不算致命：sync.js 里所有函数都会先检查
      `typeof window.supabase === "undefined"` 然后安静返回，
@@ -587,21 +854,29 @@
      教训：绝对不要用 document.write 动态插脚本。 */
   window.__supabaseLoaded = (typeof window.supabase !== "undefined");
 </script>
-<script src="store.js"></script>
+<script src="cloud-config.js?v=cloud-gateway-1"></script>
+<script src="store.js?v=20261110-consistency-1"></script>
 <script src="calc.js"></script>
-<script src="charts.js"></script>
+<script src="charts.js?v=20261111-purple-starry-1"></script>
 <!-- merit.js 要在 app.js 之前：app.js 会在渲染任务页时调
      renderMeritCard()，晚加载会报未定义。 -->
 <script src="merit.js"></script>
 <script src="assist.js"></script>
-<script src="sync.js"></script>
+<script src="sync.js?v=20261110-consistency-1"></script>
 <!-- notify.js 要在 app.js 之前：app.js 启动时会调
      renderNotifyBadges / renderNotifyBanner，晚加载会报未定义。 -->
 <script src="notify.js"></script>
-<script src="identity.js"></script>
-<script src="today.js"></script>
-<script src="account.js"></script>
-<script src="community.js"></script>
-<script src="app.js"></script>
+<script src="meeting.js?v=20261107-phase1-1"></script>
+<script src="update.js?v=20261107-companies-4"></script>
+<script src="identity.js?v=20261108-multi-account-1"></script>
+<script src="companies.js?v=20261108-invites-1"></script>
+<script src="today.js?v=20261111-purple-starry-1"></script>
+<script src="decision.js"></script>
+<script src="operations.js?v=20261110-consistency-1"></script>
+<script src="execution.js"></script>
+<script src="intake.js"></script>
+<script src="account.js?v=20261108-multi-account-1"></script>
+<script src="community.js?v=20261107-profile-8"></script>
+<script src="app.js?v=20261111-purple-starry-1"></script>
 </body>
 </html>

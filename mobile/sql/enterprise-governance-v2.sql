@@ -3807,7 +3807,7 @@ begin
         ),
         'decision_reason',x.decision_reason,'decided_at',x.decided_at,
         'created_at',x.created_at
-      ) order by case when x.status='open' then 0 else 1 end,x.created_at desc),'[]'::jsonb)
+      )),'[]'::jsonb)
       from public.enterprise_role_motions x
       left join public.profiles tp on tp.id=x.target_profile_id
       join public.profiles pp on pp.id=x.proposer_profile_id
@@ -3839,7 +3839,7 @@ begin
         ),''),
         'can_vote',bm.status='open' and v_is_board,
         'can_finalize',bm.status='open' and v_is_board
-      ) order by case when bm.status='open' then 0 else 1 end,bm.created_at desc),'[]'::jsonb)
+      )),'[]'::jsonb)
       from public.enterprise_board_motions bm
       join public.profiles pp on pp.id=bm.proposer_profile_id
       left join lateral (
@@ -3916,8 +3916,18 @@ declare
   v_result jsonb;
 begin
   if v_uid is null then raise exception 'not signed in'; end if;
-  v_eid:=public._identity_bootstrap(public._identity_owner_for_uid(v_uid));
-  if not public._identity_is_member(v_eid,v_uid) then
+  select e.id into v_eid
+    from public.enterprises e
+   where e.owner_profile_id=public._identity_owner_for_uid(v_uid)
+   limit 1;
+  if v_eid is null then
+    select m.enterprise_id into v_eid
+      from public.enterprise_members m
+     where m.profile_id=v_uid and m.status='active'
+     order by m.updated_at desc
+     limit 1;
+  end if;
+  if v_eid is null or not public._identity_is_member(v_eid,v_uid) then
     raise exception 'not an enterprise member';
   end if;
   select coalesce(jsonb_agg(item order by created_at desc),'[]'::jsonb)

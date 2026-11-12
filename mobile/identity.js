@@ -64,6 +64,9 @@ const IDENTITY_MAJOR_ROLES = Object.freeze([
 
 let identityBusy = false;
 let identityLastAttempt = 0;
+let organizationState = null;
+let organizationBusy = false;
+let organizationError = "";
 
 function identityRoleLabel(key) {
   return IDENTITY_ROLE_LABELS[String(key || "")] || String(key || "员工");
@@ -120,6 +123,25 @@ function identityHasAdvancedAccess() {
   ]);
 }
 
+function identityCanReviewAcceptance() {
+  return identityCanAny([
+    "tasks.grade", "tasks.assign", "projects.manage",
+    "company.manage", "people.manage",
+  ]);
+}
+
+function identityCanManageExecution() {
+  return identityCanAny([
+    "company.manage", "projects.manage", "tasks.assign",
+    "tasks.grade", "people.manage",
+  ]);
+}
+
+function identityCanExecution() {
+  // The server scopes the board to the caller's tasks and handoffs.
+  return !!DB.profile;
+}
+
 function identityPercent(value) {
   return Math.round(num(value) * 100) / 100;
 }
@@ -165,6 +187,42 @@ function identityErrorText(error) {
   return message || "企业身份请求失败。";
 }
 
+function resetIdentityRuntimeCache() {
+  identityLastAttempt = 0;
+  organizationState = null;
+  organizationLastRefresh = 0;
+  if (DB) {
+    DB.identity = null;
+    DB.identityError = "";
+    DB.organizationStatus = { status: "unknown", message: "", at: 0 };
+  }
+}
+
+async function ensureMyOrganization(force) {
+  if (!DB.profile || !initCloud()) return false;
+  const state = DB.organizationStatus || {};
+  if (!force && state.status === "ready" && Date.now() - num(state.at) < 30000) {
+    return true;
+  }
+  const { data, error } = await cloudClient.rpc("repair_my_organization");
+  if (error) throw error;
+  DB.organizationStatus = Object.assign({}, data || {}, { at: Date.now() });
+  if (data && data.enterprise_id && typeof updateCompanyScope === "function") {
+    updateCompanyScope(data.enterprise_id);
+  }
+  saveAll();
+  if (DB.organizationStatus.status !== "ready") {
+    DB.identity = null;
+    DB.identityError = DB.organizationStatus.status === "pending"
+      ? "尚未加入有效公司，请等待老板邀请或联系管理员。"
+      : (DB.organizationStatus.message || "公司关系需要修复。");
+    renderIdentity();
+    return false;
+  }
+  DB.identityError = "";
+  return true;
+}
+
 async function refreshIdentity(force) {
   if (!DB.profile) {
     renderIdentity();
@@ -182,11 +240,17 @@ async function refreshIdentity(force) {
   identityBusy = true;
   identityLastAttempt = now;
   try {
+    const ready = await ensureMyOrganization(force);
+    if (!ready) return;
     const { data, error } = await cloudClient.rpc(
       "get_enterprise_identity_state"
     );
     if (error) throw error;
     if (!data || !data.enterprise) throw new Error("服务端没有返回企业资料");
+    if (data.enterprise.id
+        && typeof updateCompanyScope === "function") {
+      updateCompanyScope(data.enterprise.id);
+    }
     DB.identity = data;
     DB.identityError = "";
     const preferred = data.me && data.me.preferred_mode;
@@ -198,6 +262,16 @@ async function refreshIdentity(force) {
     if (typeof renderMe === "function") renderMe();
     if (typeof renderToday === "function") renderToday();
     renderIdentity();
+    refreshOrganizationState(false);
+    if (typeof loadShareholderMeetings === "function") {
+      loadShareholderMeetings(false);
+    }
+    if (typeof refreshDecisionCenterIfActive === "function") {
+      refreshDecisionCenterIfActive();
+    }
+    if (typeof refreshOperationsIfActive === "function") {
+      refreshOperationsIfActive();
+    }
   } catch (error) {
     DB.identityError = identityErrorText(error);
     renderIdentity();
@@ -226,9 +300,13 @@ function renderIdentity() {
     $("identity-member-count").textContent = "";
     $("identity-motion-count").textContent = "";
     if ($("identity-board")) $("identity-board").innerHTML = "";
+    if ($("identity-meetings")) $("identity-meetings").innerHTML = "";
+    if ($("identity-meeting-count")) $("identity-meeting-count").textContent = "";
     if ($("identity-point-state")) $("identity-point-state").innerHTML = "";
     if ($("identity-board-count")) $("identity-board-count").textContent = "";
     if ($("identity-point-count")) $("identity-point-count").textContent = "";
+    if ($("identity-organization")) $("identity-organization").innerHTML = "";
+    if ($("organization-summary")) $("organization-summary").textContent = "";
     return;
   }
 
@@ -269,6 +347,7 @@ function renderIdentity() {
       }</span>`).join("")
     : '<span class="meta">当前身份没有额外管理权限</span>';
 
+  renderOrganizationSection();
   renderIdentityMembers(state);
   renderIdentityMotions(state);
   renderIdentityBoard(state);
@@ -793,5 +872,761 @@ function openChairAward() {
       closeSheet();
       await identityRpc("award_points", args, "积分已发放");
     } },
+  ]);
+}
+
+/* ============================================================
+   组织、创始人与股权
+   ============================================================ */
+let organizationLastRefresh = 0;
+
+function organizationMemberName(profileId) {
+  const members = (organizationState && organizationState.members) || [];
+  const found = members.find(item => String(item.profile_id) === String(profileId));
+  return found ? found.name : String(profileId || "—");
+}
+
+function organizationClassLabel(value) {
+  return ({
+    original: "原始股份", ordinary: "普通股份",
+    employee_pool: "员工持股池", employee_incentive: "员工激励份额",
+  })[value] || value || "股份";
+}
+
+function organizationMotionLabel(value) {
+  return ({
+    initial_split: "首次分股", share_change: "股份调整",
+    founder_add: "新增创始人", share_transfer: "股份转让",
+    employee_pool: "员工持股池", dissolution: "公司解散",
+  })[value] || value;
+}
+
+async function refreshOrganizationState(force) {
+  if (!DB.profile || organizationBusy) return;
+  const now = Date.now();
+  if (!force && now - organizationLastRefresh < 10000) return;
+  if (!initCloud()) return;
+  organizationBusy = true;
+  try {
+    const { data, error } = await cloudClient.rpc("get_organization_state");
+    if (error) throw error;
+    organizationState = data || {};
+    try {
+      const primary = await cloudClient.rpc("get_primary_company");
+      if (!primary.error && primary.data) organizationState.primary_company = primary.data;
+    } catch (_) {}
+    try {
+      const invites = await cloudClient.rpc("get_organization_member_invites");
+      if (!invites.error && invites.data) organizationState.member_invites = invites.data;
+    } catch (_) {}
+    organizationError = "";
+  } catch (error) {
+    organizationError = String(error.message || error || "组织数据加载失败");
+  } finally {
+    organizationLastRefresh = Date.now();
+    organizationBusy = false;
+    renderOrganizationSection();
+    if (typeof renderToday === "function") renderToday();
+  }
+}
+
+function organizationOptions(activeId) {
+  const rows = (organizationState && organizationState.organizations) || [];
+  const primaryId = organizationState && organizationState.primary_company
+    ? organizationState.primary_company.primary_enterprise_id : null;
+  return rows.map(row => '<button class="btn ghost" style="width:100%;margin-top:6px" '
+    + 'data-org-switch="' + escapeHtml(row.id) + '">' + escapeHtml(row.name)
+    + (String(row.id) === String(primaryId) ? " · 主公司" : "")
+    + (String(row.id) === String(activeId) ? " · 当前" : "") + "</button>").join("");
+}
+
+function openCreateOrganization() {
+  openSheet("创建组织", `
+    <label for="org-name">公司名称</label>
+    <input id="org-name" maxlength="120" placeholder="例如：远航工作室">
+    <label for="org-founders">共同创始人员工号</label>
+    <textarea id="org-founders" placeholder="每行一个员工号；留空就是单人公司"></textarea>
+    <div class="hint">单人创建会立即成为临时董事长。多人创建需要全部创始人接受邀请并完成首次分股。</div>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: "创建组织", onClick: async () => {
+      const name = ($("org-name") || {}).value || "";
+      const codes = String(($("org-founders") || {}).value || "")
+        .split(/[\n,，]+/).map(value => value.trim()).filter(Boolean);
+      if (!name.trim()) { toast("先填写公司名称"); return; }
+      try {
+        const { data, error } = await cloudClient.rpc("create_organization", {
+          p_name: name.trim(), p_founder_codes: codes,
+        });
+        if (error) throw error;
+        closeSheet();
+        await refreshOrganizationState(true);
+        await refreshIdentity(true);
+        toast(data && data.status === "active" ? "公司已创建" : "组织已创建，等待创始人接受邀请");
+      } catch (error) { toast(organizationErrorText(error)); }
+    }},
+  ]);
+}
+
+function openRenameOrganization() {
+  const org = organizationState && organizationState.organization;
+  if (!org) { toast("当前没有可修改的公司"); return; }
+  openSheet("修改公司名称", `
+    <label for="org-rename-input">公司名称</label>
+    <input id="org-rename-input" maxlength="120" value="${escapeHtml(org.name || "")}">
+    <div class="hint">名称会同步给公司内所有成员。1～120 个字符。</div>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: "保存名称", onClick: async () => {
+      const name = String(($("org-rename-input") || {}).value || "").trim();
+      if (!name) { toast("公司名称不能为空"); return; }
+      try {
+        const { data, error } = await cloudClient.rpc("rename_organization", {
+          p_enterprise: org.id, p_name: name,
+        });
+        if (error) throw error;
+        closeSheet();
+        await refreshOrganizationState(true);
+        await refreshIdentity(true);
+        toast(data && data.changed ? "公司名称已更新" : "公司名称没有变化");
+      } catch (error) { toast(organizationErrorText(error)); }
+    }},
+  ]);
+}
+
+function openInviteOrganizationMember() {
+  const org = organizationState && organizationState.organization;
+  if (!org) { toast("当前没有可管理的公司"); return; }
+  if (!initCloud()) { toast("云服务连不上，检查网络后重试"); return; }
+  openSheet("邀请公司成员", `
+    <label for="org-member-lookup">员工号 / 老板号 / 姓名</label>
+    <input id="org-member-lookup" autocapitalize="off" placeholder="填员工号或老板号最准确；重名时必须填号码">
+    <div class="row2">
+      <div><label for="org-member-department">部门</label>
+        <input id="org-member-department" placeholder="例如：产品部"></div>
+      <div><label for="org-member-title">职务</label>
+        <input id="org-member-title" placeholder="例如：产品经理"></div>
+    </div>
+    <div class="hint">对方接受后才会加入。加入新公司不会退出原公司，也不会迁移原公司的任务和工时。</div>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: "发出邀请", onClick: async () => {
+      const lookup = String(($("org-member-lookup") || {}).value || "").trim();
+      if (!lookup) { toast("先填写员工号、老板号或姓名"); return; }
+      try {
+        const { data, error } = await cloudClient.rpc("invite_organization_member", {
+          p_enterprise: org.id, p_lookup: lookup,
+          p_department: String(($("org-member-department") || {}).value || "").trim(),
+          p_title: String(($("org-member-title") || {}).value || "").trim(),
+        });
+        if (error) throw error;
+        closeSheet();
+        await refreshOrganizationState(true);
+        await refreshIdentity(true);
+        toast(data && data.already_member
+          ? `${data.name || lookup} 已经是公司成员`
+          : `已向 ${(data && data.name) || lookup} 发出邀请`);
+      } catch (error) { toast(organizationErrorText(error)); }
+    }},
+  ]);
+}
+
+async function setPrimaryOrganization() {
+  const org = organizationState && organizationState.organization;
+  if (!org || !initCloud()) return;
+  try {
+    const { error } = await cloudClient.rpc("set_primary_company", { p_enterprise: org.id });
+    if (error) throw error;
+    await refreshOrganizationState(true);
+    await refreshIdentity(true);
+    toast("已设为你的主公司");
+  } catch (error) { toast(organizationErrorText(error)); }
+}
+
+async function respondOrganizationMemberInvite(inviteId, accept) {
+  if (!inviteId || !initCloud()) return;
+  try {
+    const { data, error } = await cloudClient.rpc("respond_organization_member_invite", {
+      p_invite: inviteId, p_accept: !!accept,
+    });
+    if (error) throw error;
+    if (data && data.ok === false) throw new Error(data.error || "邀请处理失败");
+    await refreshOrganizationState(true);
+    await refreshIdentity(true);
+    toast(accept ? `已加入 ${(data && data.organization_name) || "新公司"}` : "已拒绝公司邀请");
+  } catch (error) { toast(organizationErrorText(error)); }
+}
+
+async function switchOrganization(enterpriseId) {
+  if (!enterpriseId || !initCloud()) return;
+  if (typeof pendingCount === "function" && pendingCount() > 0) {
+    toast("当前公司还有待上传数据，请先同步完成再切换公司");
+    return;
+  }
+  try {
+    const { error } = await cloudClient.rpc("set_active_organization", {
+      p_enterprise: enterpriseId,
+    });
+    if (error) throw error;
+    if (typeof unsubscribeRealtime === "function") unsubscribeRealtime();
+    if (typeof clearCompanyScopedCache === "function") clearCompanyScopedCache();
+    organizationLastRefresh = 0;
+    await refreshIdentity(true);
+    if (typeof syncNow === "function") syncNow("company-switch");
+    toast("已切换组织");
+  } catch (error) { toast(organizationErrorText(error)); }
+}
+
+function organizationErrorText(error) {
+  const message = String((error && (error.message || error.details)) || error || "");
+  const lower = message.toLowerCase();
+  if (lower.includes("not signed in") || lower.includes("jwt")) return "登录状态过期，请重新登录。";
+  if (lower.includes("permission") || lower.includes("founder approval")) return "当前身份没有这项组织权限。";
+  if (lower.includes("get_primary_company") || lower.includes("set_primary_company")
+      || lower.includes("invite_organization_member")
+      || lower.includes("respond_organization_member_invite")
+      || lower.includes("organization_member_invites")) {
+    return "主公司与成员邀请 SQL 尚未安装，请运行 mobile/sql/phase1-primary-company-member-invites-v1.sql";
+  }
+  if (lower.includes("rename_organization") || lower.includes("add_organization_member")
+      || lower.includes("organization-management-v1")) {
+    return "公司管理 SQL 尚未安装，请运行 mobile/sql/organization-management-v1.sql";
+  }
+  if (lower.includes("repair_my_organization")
+      || lower.includes("get_organization_health")) {
+    return "多账号修复 SQL 尚未安装，请运行 mobile/sql/multi-account-sync-health-v1.sql";
+  }
+  if (lower.includes("organization-founders-v1") || lower.includes("function") && lower.includes("not found")) {
+    return "组织股权 SQL 尚未安装，请运行 mobile/sql/organization-founders-v1.sql";
+  }
+  return message || "组织操作失败";
+}
+
+function organizationFoundersHtml() {
+  const founders = (organizationState && organizationState.founders) || [];
+  return founders.length ? founders.map(item =>
+    '<div class="today-ledger-row"><div><b>' + escapeHtml(item.name)
+    + (item.is_original ? " · 创始人" : "") + '</b><span>'
+    + escapeHtml(identityRoleLabel(item.role_key)) + ' · '
+    + escapeHtml(item.title || "成员") + '</span></div><strong>原始</strong></div>'
+  ).join("") : '<div class="identity-empty"><b>还没有创始人</b></div>';
+}
+
+function organizationLotsHtml() {
+  const lots = (organizationState && organizationState.share_lots) || [];
+  return lots.length ? lots.map(item =>
+    '<div class="today-ledger-row"><div><b>' + escapeHtml(item.owner_name || "员工持股池")
+    + '</b><span>' + escapeHtml(organizationClassLabel(item.share_class))
+    + ' · 投票 ×' + num(item.voting_weight) + '</span></div><strong>'
+    + num(item.units) + " 单位</strong></div>"
+  ).join("") : '<div class="identity-empty"><b>尚未分股</b><span>邀请完成后发起首次分股。</span></div>';
+}
+
+function organizationInvitesHtml() {
+  const invites = ((organizationState && organizationState.invites) || []).filter(item =>
+    item.status === "invited" && String(item.invitee_profile_id) === String(DB.profile.id));
+  return invites.map(item => '<div class="identity-motion open">'
+    + '<div class="identity-motion-head"><div><div class="identity-eyebrow">创始人邀请</div>'
+    + '<b>' + escapeHtml(organizationState.organization.name) + '</b></div></div>'
+    + '<div class="identity-motion-foot"><span>有效期至 '
+    + escapeHtml(identityDate(item.expires_at)) + '</span>'
+    + '<div class="identity-vote-actions"><button class="btn ghost" data-org-invite-reject="'
+    + escapeHtml(item.id) + '">拒绝</button><button class="btn" data-org-invite-accept="'
+    + escapeHtml(item.id) + '">接受</button></div></div></div>').join("");
+}
+
+function organizationMotionsHtml() {
+  const motions = (organizationState && organizationState.motions) || [];
+  const me = (organizationState && organizationState.me) || {};
+  return motions.length ? motions.map(item => {
+    const open = item.status === "open";
+    const canVote = open && (item.required_rule !== "founder_unanimous" || me.is_founder);
+    return '<div class="identity-motion ' + (open ? "open" : "") + '">'
+      + '<div class="identity-motion-head"><div><div class="identity-eyebrow">'
+      + escapeHtml(item.required_rule === "founder_unanimous" ? "全体创始人一致同意"
+        : item.required_rule === "weighted_4_5" ? "股东 4/5 加权通过" : "股东 2/3 加权通过")
+      + '</div><b>' + escapeHtml(organizationMotionLabel(item.kind)) + '</b></div>'
+      + '<span class="identity-status ' + (item.status === "passed" ? "passed"
+        : item.status === "rejected" ? "rejected" : "open") + '">'
+      + escapeHtml(item.status) + "</span></div>"
+      + '<div class="identity-motion-reason">' + escapeHtml(item.reason || "—") + "</div>"
+      + '<div class="identity-vote-line"><span>赞成 ' + num(item.yes_units)
+      + '</span><span>反对 ' + num(item.no_units) + '</span><span>票数 '
+      + num(item.vote_count) + "</span></div>"
+      + (open ? '<div class="identity-motion-foot"><span>截止 '
+        + escapeHtml(identityDate(item.closes_at)) + '</span><div class="identity-vote-actions">'
+        + (canVote ? '<button class="btn ghost" data-org-vote="' + escapeHtml(item.id)
+          + '" data-choice="no">反对</button><button class="btn ghost" data-org-vote="'
+          + escapeHtml(item.id) + '" data-choice="abstain">弃权</button><button class="btn" data-org-vote="'
+          + escapeHtml(item.id) + '" data-choice="yes">赞成</button>' : "")
+        + '</div></div>' : "") + "</div>";
+  }).join("") : '<div class="identity-empty"><b>暂无股权表决</b><span>重大调整会显示在这里。</span></div>';
+}
+
+function organizationEmployeeHtml(canManage) {
+  const pool = organizationState && organizationState.employee_pool;
+  if (!pool) return "";
+  const grants = (organizationState.employee_grants || []).map(item =>
+    '<div class="today-ledger-row"><div><b>' + escapeHtml(item.name)
+    + '</b><span>已归属 ' + num(item.vested_units) + ' / ' + num(item.units)
+    + ' 单位</span></div><strong>' + escapeHtml(item.status) + '</strong></div>').join("");
+  return '<div class="section-head"><span>员工激励</span><span class="meta">剩余 '
+    + num(pool.remaining_units) + ' 单位</span></div><div class="card">'
+    + (grants || '<div class="identity-empty"><b>还没有员工激励</b></div>')
+    + (canManage ? '<button class="btn ghost" id="btn-org-grant" style="width:100%;margin-top:8px">授予员工激励</button>' : "")
+    + '</div>';
+}
+
+function organizationMemberInvitesHtml() {
+  const data = (organizationState && organizationState.member_invites) || {};
+  const received = (data.received || []).filter(item => item.status === "invited");
+  const sent = (data.sent || []).filter(item => item.status === "invited");
+  const receivedHtml = received.map(item => `
+    <div class="identity-motion open">
+      <div class="identity-motion-head"><div>
+        <div class="identity-eyebrow">公司成员邀请</div>
+        <b>${escapeHtml(item.organization_name || "新公司")}</b>
+      </div><span class="identity-status open">待接受</span></div>
+      <div class="identity-vote-line">
+        <span>${escapeHtml(item.department || "未填部门")}</span>
+        <span>${escapeHtml(item.title || "普通成员")}</span>
+      </div>
+      <div class="identity-vote-actions">
+        <button class="btn ghost" data-member-invite-reject="${escapeHtml(item.id)}">拒绝</button>
+        <button class="btn" data-member-invite-accept="${escapeHtml(item.id)}">接受邀请</button>
+      </div>
+    </div>`).join("");
+  const sentHtml = sent.map(item => `
+    <div class="today-ledger-row">
+      <div><b>${escapeHtml(item.invitee_name || "成员")}</b>
+        <span>${escapeHtml(item.department || "未填部门")} · ${escapeHtml(item.title || "普通成员")}</span></div>
+      <strong>等待接受</strong>
+    </div>`).join("");
+  return (receivedHtml
+    ? '<div class="section-head"><span>待我处理</span><span class="meta">' + received.length + ' 个公司邀请</span></div>' + receivedHtml
+    : "")
+    + (sentHtml
+      ? '<div class="section-head"><span>已发出的成员邀请</span><span class="meta">' + sent.length + ' 个待接受</span></div><div class="card">' + sentHtml + '</div>'
+      : "");
+}
+
+async function openShareDashboard() {
+  if (!DB.profile) { toast("登录后查看股份"); return; }
+  if (!organizationState || !organizationState.organization) {
+    await refreshOrganizationState(true);
+  }
+  if (!organizationState || !organizationState.organization) {
+    toast(organizationError || "当前没有可查看的公司股份");
+    return;
+  }
+
+  const lots = (organizationState.share_lots || []).filter(item =>
+    item.status === "active" && item.owner_profile_id);
+  const total = num(organizationState.total_units);
+  const originalUnits = lots.filter(item => item.share_class === "original")
+    .reduce((sum, item) => sum + num(item.units), 0);
+  const ordinaryUnits = lots.filter(item => item.share_class === "ordinary")
+    .reduce((sum, item) => sum + num(item.units), 0);
+  const holders = {};
+  lots.forEach(item => {
+    const key = String(item.owner_profile_id);
+    if (!holders[key]) holders[key] = {
+      name: item.owner_name || organizationMemberName(item.owner_profile_id),
+      original: 0, ordinary: 0, units: 0, voting: 0,
+    };
+    const units = num(item.units);
+    holders[key].units += units;
+    holders[key].voting += units * num(item.voting_weight || 1);
+    if (item.share_class === "original") holders[key].original += units;
+    else holders[key].ordinary += units;
+  });
+  const holderRows = Object.values(holders).sort((a, b) => b.units - a.units);
+  const pool = organizationState.employee_pool;
+  const canManage = !!(organizationState.me && organizationState.me.can_manage);
+
+  openSheet("股份", `
+    <div class="card identity-me-card">
+      <div class="identity-meta-grid" style="margin-top:0;padding-top:0;border-top:0">
+        <div><span>总股份单位</span><b>${num(total)}</b></div>
+        <div><span>加权投票权</span><b>${num(organizationState.voting_units)}</b></div>
+        <div><span>原始股份</span><b>${num(originalUnits)} 单位</b></div>
+        <div><span>普通股份</span><b>${num(ordinaryUnits)} 单位</b></div>
+      </div>
+    </div>
+    <div class="section-head"><span>持股人</span><span class="meta">${holderRows.length} 人</span></div>
+    <div class="card">${holderRows.length ? holderRows.map(item => `
+      <div class="today-ledger-row">
+        <div><b>${escapeHtml(item.name)}</b><span>原始 ${num(item.original)} · 普通 ${num(item.ordinary)}</span></div>
+        <strong>${num(item.units)} 单位</strong>
+      </div>`).join("") : '<div class="identity-empty"><b>尚未分股</b><span>完成首次分股后会显示持股人。</span></div>'}</div>
+    <div class="section-head"><span>员工持股池</span><span class="meta">${pool ? "已建立" : "未建立"}</span></div>
+    <div class="card">${pool
+      ? `<div class="today-ledger-row"><div><b>${num(pool.total_units)} 总单位</b><span>已授予 ${num(pool.allocated_units)} · 剩余 ${num(pool.remaining_units)}</span></div><strong>无投票权</strong></div>`
+      : '<div class="identity-empty"><b>还没有员工持股池</b><span>持股池最多占总股本 10%。</span></div>'}</div>
+    <div class="hint">原始股份投票权重 ×1.1；普通股份和员工激励权重 ×1.0。</div>
+  `, [
+    { label: "关闭", onClick: closeSheet },
+    ...(canManage ? [{ label: "重新分配", onClick: () => {
+      closeSheet(); openShareChange();
+    }}] : []),
+  ]);
+}
+
+function renderOrganizationSection() {
+  const box = $("identity-organization");
+  if (!box) return;
+  const summary = $("organization-summary");
+  if (summary) {
+    summary.textContent = organizationState && organizationState.organization
+      ? (organizationState.organization.foundation_status === "founding" ? "筹备中" : "已成立")
+      : (DB.profile ? "创建或加入公司" : "");
+  }
+  if (!DB.profile) {
+    box.innerHTML = '<div class="identity-empty"><b>登录后管理组织</b>'
+      + '<span>创建公司、邀请创始人并确认首次分股。</span></div>';
+    return;
+  }
+  if (organizationError) {
+    box.innerHTML = '<div class="identity-empty"><b>组织数据还没有加载</b><span>'
+      + escapeHtml(organizationError) + '</span></div>';
+    return;
+  }
+  if (!organizationState) {
+    box.innerHTML = '<div class="identity-empty"><b>正在加载组织</b>'
+      + '<span>正在读取创始人与股份资料…</span></div>';
+    return;
+  }
+  const org = organizationState.organization;
+  if (!org) {
+    const options = organizationOptions("");
+    box.innerHTML = '<div class="card identity-motion open">'
+      + '<div class="identity-motion-head"><div><div class="identity-eyebrow">新组织</div>'
+      + '<b>创建自己的公司</b></div><span class="identity-status open">可创建</span></div>'
+      + '<div class="identity-vote-line">自己创建后自动成为创始人；单人公司自动成为临时董事长。</div>'
+      + '<button class="btn" id="btn-org-create" style="width:100%;margin-top:10px">创建组织</button>'
+      + (options ? '<div class="identity-eyebrow" style="margin-top:14px">已加入的组织</div>' + options : "")
+      + '</div>';
+    $("btn-org-create").onclick = openCreateOrganization;
+    box.querySelectorAll("[data-org-switch]").forEach(button => {
+      button.onclick = () => switchOrganization(button.dataset.orgSwitch);
+    });
+    return;
+  }
+  const me = organizationState.me || {};
+  const founders = organizationState.founders || [];
+  const canManage = !!me.can_manage;
+  const primaryId = organizationState.primary_company
+    ? organizationState.primary_company.primary_enterprise_id : null;
+  const isPrimary = String(org.id) === String(primaryId);
+  const founding = org.foundation_status === "founding";
+  const pool = organizationState.employee_pool;
+  box.innerHTML = '<div class="card identity-me-card">'
+    + '<div class="identity-me-head"><div><div class="identity-eyebrow">当前组织</div>'
+    + '<div class="identity-role-line"><b>' + escapeHtml(org.name) + '</b>'
+    + (me.is_founder ? '<span class="identity-owner">创始人</span>' : "")
+    + '<span class="identity-share">' + escapeHtml(org.foundation_status) + '</span>'
+    + (isPrimary ? '<span class="identity-owner">主公司</span>' : "")
+    + (!isPrimary ? '<button class="identity-small-btn" id="btn-org-primary">设为主公司</button>' : "")
+    + (canManage ? '<button class="identity-small-btn" id="btn-org-rename">改名</button>' : "")
+    + '</div></div>'
+    + '<div class="identity-weight"><b>' + num(organizationState.total_units)
+    + '</b><span>总股份单位</span></div></div>'
+    + '<div class="identity-meta-grid"><div><span>加权投票权</span><b>'
+    + num(organizationState.voting_units) + '</b></div><div><span>创始人</span><b>'
+    + founders.filter(item => item.status === "active").length + ' 人</b></div>'
+    + '<div><span>员工持股池</span><b>' + (pool ? num(pool.total_units) : "未建立")
+    + '</b></div><div><span>我的身份</span><b>' + escapeHtml(identityRoleLabel(me.role_key))
+    + '</b></div></div>'
+    + (founding && canManage
+      ? '<div class="btn-row" style="margin-top:12px"><button class="btn ghost" id="btn-org-invite">邀请创始人</button>'
+        + '<button class="btn" id="btn-org-initial-split">发起首次分股</button></div>'
+        + '<button class="btn ghost" id="btn-org-invite-member" style="width:100%;margin-top:8px">邀请公司成员</button>'
+      : canManage
+        ? '<div class="btn-row" style="margin-top:12px"><button class="btn ghost" id="btn-org-invite-member">邀请公司成员</button>'
+          + '<button class="btn ghost" id="btn-org-transfer">股份转让</button></div>'
+          + '<button class="btn ghost" id="btn-org-more" style="width:100%;margin-top:8px">更多股权操作</button>'
+        : '<div class="btn-row" style="margin-top:12px"><button class="btn ghost" id="btn-org-transfer">股份转让</button></div>')
+    + (organizationOptions(org.id)
+      ? '<div class="identity-eyebrow" style="margin-top:14px">切换组织</div>'
+        + organizationOptions(org.id) : "")
+    + '</div>'
+    + organizationMemberInvitesHtml()
+    + organizationInvitesHtml()
+    + '<div class="section-head"><span>创始人</span><span class="meta">'
+    + founders.length + ' 人</span></div><div class="card">' + organizationFoundersHtml() + '</div>'
+    + '<div class="section-head"><span>股本结构</span><span class="meta">原始 ×1.1 / 普通 ×1.0</span></div>'
+    + '<div class="card">' + organizationLotsHtml() + '</div>'
+    + '<div class="section-head"><span>股权表决</span><span class="meta">'
+    + (organizationState.motions || []).filter(item => item.status === "open").length
+    + ' 项进行中</span></div><div>' + organizationMotionsHtml() + '</div>'
+    + organizationEmployeeHtml(canManage);
+  if ($("btn-org-create")) $("btn-org-create").onclick = openCreateOrganization;
+  if ($("btn-org-primary")) $("btn-org-primary").onclick = setPrimaryOrganization;
+  if ($("btn-org-rename")) $("btn-org-rename").onclick = openRenameOrganization;
+  if ($("btn-org-invite-member")) $("btn-org-invite-member").onclick = openInviteOrganizationMember;
+  if ($("btn-org-invite")) $("btn-org-invite").onclick = inviteOrganizationFounder;
+  if ($("btn-org-initial-split")) $("btn-org-initial-split").onclick = openInitialSplit;
+  if ($("btn-org-transfer")) $("btn-org-transfer").onclick = openShareTransfer;
+  if ($("btn-org-more")) $("btn-org-more").onclick = openOrganizationMore;
+  if ($("btn-org-grant")) $("btn-org-grant").onclick = openEmployeeGrant;
+  box.querySelectorAll("[data-org-switch]").forEach(button => {
+    button.onclick = () => switchOrganization(button.dataset.orgSwitch);
+  });
+  box.querySelectorAll("[data-org-invite-accept]").forEach(button => {
+    button.onclick = () => respondOrganizationInvite(button.dataset.orgInviteAccept, true);
+  });
+  box.querySelectorAll("[data-org-invite-reject]").forEach(button => {
+    button.onclick = () => respondOrganizationInvite(button.dataset.orgInviteReject, false);
+  });
+  box.querySelectorAll("[data-org-vote]").forEach(button => {
+    button.onclick = () => castOrganizationVote(button.dataset.orgVote, button.dataset.choice);
+  });
+  box.querySelectorAll("[data-member-invite-accept]").forEach(button => {
+    button.onclick = () => respondOrganizationMemberInvite(button.dataset.memberInviteAccept, true);
+  });
+  box.querySelectorAll("[data-member-invite-reject]").forEach(button => {
+    button.onclick = () => respondOrganizationMemberInvite(button.dataset.memberInviteReject, false);
+  });
+}
+
+async function inviteOrganizationFounder() {
+  const org = organizationState && organizationState.organization;
+  if (!org) return;
+  const code = prompt("输入共同创始人员工号或姓名");
+  if (!code) return;
+  try {
+    const { error } = await cloudClient.rpc("invite_organization_founder", {
+      p_enterprise: org.id, p_code: code.trim(),
+    });
+    if (error) throw error;
+    await refreshOrganizationState(true);
+    toast("创始人邀请已发出");
+  } catch (error) { toast(organizationErrorText(error)); }
+}
+
+async function respondOrganizationInvite(inviteId, accept) {
+  try {
+    const { error } = await cloudClient.rpc("respond_organization_founder_invite", {
+      p_invite: inviteId, p_accept: !!accept,
+    });
+    if (error) throw error;
+    await refreshOrganizationState(true);
+    await refreshIdentity(true);
+    toast(accept ? "已接受创始人邀请" : "已拒绝创始人邀请");
+  } catch (error) { toast(organizationErrorText(error)); }
+}
+
+function openInitialSplit() {
+  const founders = (organizationState.founders || []).filter(item => item.status === "active");
+  if (!founders.length) { toast("没有可分配的创始人"); return; }
+  const equal = Math.round(10000 / founders.length) / 100;
+  openSheet("首次分股", founders.map(item =>
+    '<label>' + escapeHtml(item.name) + '（' + escapeHtml(item.code || "") + '）'
+    + '<input type="number" min="0.0001" step="0.0001" value="' + equal
+    + '" data-org-split-profile="' + escapeHtml(item.profile_id) + '"></label>'
+  ).join("") + '<div class="hint">总单位必须等于 100。原始股份按 1.1 计算投票权重。</div>', [
+    { label: "取消", onClick: closeSheet },
+    { label: "发起全体创始人表决", onClick: async () => {
+      const allocations = Array.from(document.querySelectorAll("[data-org-split-profile]"))
+        .map(input => ({ profile_id: input.dataset.orgSplitProfile, units: num(input.value) }));
+      const total = allocations.reduce((sum, item) => sum + item.units, 0);
+      if (Math.abs(total - 100) > 0.001) { toast("总股份必须等于 100"); return; }
+      try {
+        const closes = new Date(Date.now() + 3 * 86400000).toISOString();
+        const { error } = await cloudClient.rpc("propose_initial_split", {
+          p_allocations: allocations, p_reason: "首次分股确认", p_closes_at: closes,
+        });
+        if (error) throw error;
+        closeSheet();
+        await refreshOrganizationState(true);
+        toast("首次分股提案已发起，等待全部创始人同意");
+      } catch (error) { toast(organizationErrorText(error)); }
+    }},
+  ]);
+}
+
+async function castOrganizationVote(motionId, choice) {
+  try {
+    const { error } = await cloudClient.rpc("cast_equity_vote", {
+      p_motion: motionId, p_choice: choice,
+    });
+    if (error) throw error;
+    await refreshOrganizationState(true);
+    await refreshIdentity(true);
+    toast("股权表决已记录");
+  } catch (error) { toast(organizationErrorText(error)); }
+}
+
+function openShareTransfer() {
+  const me = organizationState.me || {};
+  const ownLots = (organizationState.share_lots || []).filter(item =>
+    String(item.owner_profile_id) === String(DB.profile.id));
+  if (!ownLots.length) { toast("你当前没有可转让股份"); return; }
+  const buyers = (organizationState.members || []).filter(item =>
+    String(item.profile_id) !== String(DB.profile.id) && item.status === "active");
+  openSheet("股份转让", `
+    <label>卖出股份批次<select id="org-transfer-lot">${ownLots.map(item =>
+      `<option value="${escapeHtml(item.id)}">${escapeHtml(organizationClassLabel(item.share_class))} · ${num(item.units)} 单位</option>`
+    ).join("")}</select></label>
+    <label>受让人<select id="org-transfer-buyer">${buyers.map(item =>
+      `<option value="${escapeHtml(item.profile_id)}">${escapeHtml(item.name)}（${escapeHtml(item.code || "")}）</option>`
+    ).join("")}</select></label>
+    <label>转让单位<input id="org-transfer-units" type="number" min="0.0001" step="0.0001"></label>
+    <label>转让价格<input id="org-transfer-price" type="number" min="0" step="0.01" value="0"></label>
+    <div class="hint">原始股份转让后，转出部分永久变成普通 1.0 股份。</div>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: "发起创始人表决", onClick: async () => {
+      try {
+        const closes = new Date(Date.now() + 3 * 86400000).toISOString();
+        const { error } = await cloudClient.rpc("create_equity_motion", {
+          p_kind: "share_transfer",
+          p_payload: {
+            lot_id: $("org-transfer-lot").value,
+            buyer_profile_id: $("org-transfer-buyer").value,
+            units: num($("org-transfer-units").value),
+            price: num($("org-transfer-price").value),
+          },
+          p_reason: "股份转让申请", p_closes_at: closes,
+        });
+        if (error) throw error;
+        closeSheet(); await refreshOrganizationState(true);
+        toast("股份转让提案已发起");
+      } catch (error) { toast(organizationErrorText(error)); }
+    }},
+  ]);
+}
+
+function openOrganizationMore() {
+  openSheet("更多股权操作", `
+    <button class="btn ghost" style="width:100%;margin-bottom:8px" id="org-action-share-change">重新分配股份</button>
+    <button class="btn ghost" style="width:100%;margin-bottom:8px" id="org-action-founder-add">新增创始人</button>
+    <button class="btn ghost" style="width:100%;margin-bottom:8px" id="org-action-pool">设立员工持股池</button>
+    <button class="btn ghost" style="width:100%" id="org-action-dissolve">发起公司解散</button>
+  `, [{ label: "关闭", onClick: closeSheet }]);
+  $("org-action-share-change").onclick = openShareChange;
+  $("org-action-founder-add").onclick = openFounderAddition;
+  $("org-action-pool").onclick = openEmployeePool;
+  $("org-action-dissolve").onclick = openDissolution;
+}
+
+function openShareChange() {
+  const members = (organizationState.members || []).filter(item => item.status === "active");
+  const unitsByProfile = {};
+  (organizationState.share_lots || []).forEach(item => {
+    if (item.owner_profile_id) {
+      unitsByProfile[item.owner_profile_id] = (unitsByProfile[item.owner_profile_id] || 0) + num(item.units);
+    }
+  });
+  openSheet("重新分配股份", members.map(item =>
+    `<label>${escapeHtml(item.name)}<input type="number" min="0" step="0.0001" value="${num(unitsByProfile[item.profile_id])}" data-org-change-profile="${escapeHtml(item.profile_id)}"></label>`
+  ).join("") + '<div class="hint">全体创始人必须同意；总单位必须为 100。</div>', [
+    { label: "取消", onClick: closeSheet },
+    { label: "发起表决", onClick: async () => {
+      const allocations = Array.from(document.querySelectorAll("[data-org-change-profile]"))
+        .map(input => ({ profile_id: input.dataset.orgChangeProfile, units: num(input.value) }))
+        .filter(item => item.units > 0);
+      if (Math.abs(allocations.reduce((sum, item) => sum + item.units, 0) - 100) > 0.001) {
+        toast("总股份必须等于 100"); return;
+      }
+      try {
+        const { error } = await cloudClient.rpc("create_equity_motion", {
+          p_kind: "share_change", p_payload: { allocations },
+          p_reason: "股份重新分配", p_closes_at: new Date(Date.now() + 3 * 86400000).toISOString(),
+        });
+        if (error) throw error;
+        closeSheet(); await refreshOrganizationState(true); toast("股份调整提案已发起");
+      } catch (error) { toast(organizationErrorText(error)); }
+    }},
+  ]);
+}
+
+function openFounderAddition() {
+  const founderIds = new Set((organizationState.founders || []).map(item => String(item.profile_id)));
+  const members = (organizationState.members || []).filter(item =>
+    item.status === "active" && !founderIds.has(String(item.profile_id)));
+  if (!members.length) { toast("没有可新增的成员"); return; }
+  openSheet("新增创始人", `
+    <label>成员<select id="org-founder-profile">${members.map(item =>
+      `<option value="${escapeHtml(item.profile_id)}">${escapeHtml(item.name)}（${escapeHtml(item.code || "")}）</option>`
+    ).join("")}</select></label>
+    <label>授予原始股份单位<input id="org-founder-units" type="number" min="0.0001" step="0.0001"></label>
+    <div class="hint">需要全部现有创始人一致同意。</div>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: "发起表决", onClick: async () => {
+      try {
+        const { error } = await cloudClient.rpc("create_equity_motion", {
+          p_kind: "founder_add",
+          p_payload: {
+            profile_id: $("org-founder-profile").value,
+            units: num($("org-founder-units").value),
+          },
+          p_reason: "新增创始人", p_closes_at: new Date(Date.now() + 3 * 86400000).toISOString(),
+        });
+        if (error) throw error;
+        closeSheet(); await refreshOrganizationState(true); toast("新增创始人提案已发起");
+      } catch (error) { toast(organizationErrorText(error)); }
+    }},
+  ]);
+}
+
+function openEmployeePool() {
+  const total = num(organizationState.total_units || 100);
+  openSheet("设立员工持股池", `
+    <label>持股池总单位<input id="org-pool-units" type="number" min="0.0001" step="0.0001" max="${total * 0.1}"></label>
+    <div class="hint">员工持股池最多占总股本 10%，无投票权，需要全部创始人同意。</div>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: "发起表决", onClick: async () => {
+      try {
+        const { error } = await cloudClient.rpc("create_equity_motion", {
+          p_kind: "employee_pool", p_payload: { units: num($("org-pool-units").value) },
+          p_reason: "设立员工持股池", p_closes_at: new Date(Date.now() + 3 * 86400000).toISOString(),
+        });
+        if (error) throw error;
+        closeSheet(); await refreshOrganizationState(true); toast("员工持股池提案已发起");
+      } catch (error) { toast(organizationErrorText(error)); }
+    }},
+  ]);
+}
+
+function openDissolution() {
+  if (!confirm("发起公司解散？通过后公司进入冻结和清算状态，不会立即删除数据。")) return;
+  const reason = prompt("填写解散原因");
+  if (!reason) return;
+  cloudClient.rpc("create_equity_motion", {
+    p_kind: "dissolution", p_payload: { reason },
+    p_reason: reason.trim(), p_closes_at: new Date(Date.now() + 7 * 86400000).toISOString(),
+  }).then(({ error }) => {
+    if (error) throw error;
+    return refreshOrganizationState(true);
+  }).then(() => toast("解散提案已发起，需要超过 4/5 加权投票权同意"))
+    .catch(error => toast(organizationErrorText(error)));
+}
+
+function openEmployeeGrant() {
+  const pool = organizationState.employee_pool;
+  if (!pool) { toast("先建立员工持股池"); return; }
+  const members = (organizationState.members || []).filter(item => item.status === "active");
+  openSheet("授予员工激励", `
+    <label>员工<select id="org-grant-profile">${members.map(item =>
+      `<option value="${escapeHtml(item.profile_id)}">${escapeHtml(item.name)}（${escapeHtml(item.code || "")}）</option>`
+    ).join("")}</select></label>
+    <label>授予单位<input id="org-grant-units" type="number" min="0.0001" step="0.0001" max="${num(pool.remaining_units)}"></label>
+    <div class="hint">默认 4 年归属、满 1 年归属 25%，无投票权。</div>
+  `, [
+    { label: "取消", onClick: closeSheet },
+    { label: "授予", onClick: async () => {
+      try {
+        const { error } = await cloudClient.rpc("grant_employee_equity", {
+          p_profile: $("org-grant-profile").value,
+          p_units: num($("org-grant-units").value),
+          p_vesting_start: new Date().toISOString(),
+        });
+        if (error) throw error;
+        closeSheet(); await refreshOrganizationState(true); toast("员工激励已授予");
+      } catch (error) { toast(organizationErrorText(error)); }
+    }},
   ]);
 }

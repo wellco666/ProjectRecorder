@@ -19,6 +19,151 @@ window.addEventListener("error", event => {
     || event.message || String(event));
 });
 
+function queueLocalProjectsForCloud() {
+  const projects = (DB.projects || []).filter(item => !item.remote_id);
+  if (!projects.length) {
+    toast("没有需要上传的本机项目");
+    return 0;
+  }
+  projects.forEach(project => {
+    queueProjectSync(project, "upsert");
+    (DB.steps || []).filter(step => step.project_id === project.id)
+      .forEach(step => queueStepSync(step, "upsert"));
+  });
+  saveAll();
+  if (typeof syncNow === "function") syncNow("project-confirm");
+  toast(`已排队上传 ${projects.length} 个本机项目`);
+  return projects.length;
+}
+
+async function runSystemDiagnosis() {
+  const box = $("system-health-result");
+  if (!box) return;
+  const local = typeof localSyncDiagnostics === "function"
+    ? localSyncDiagnostics() : {};
+  const pending = Number(local.pending || 0);
+  const localHtml = '<div class="banner ' + (pending || local.pullError
+      ? "warn" : "good") + '">'
+    + (pending ? '本机还有 ' + pending + ' 条待上传数据'
+      : local.pullError ? '上次拉取有异常' : '本机账号数据与队列正常')
+    + '</div>'
+    + '<div class="identity-meta-grid" style="margin-top:10px">'
+    + '<div><span>当前账号</span><b>' + escapeHtml((DB.profile && DB.profile.code) || "未登录") + '</b></div>'
+    + '<div><span>当前公司</span><b>' + escapeHtml(local.company_id || "未确定") + '</b></div>'
+    + '<div><span>最近同步</span><b>' + escapeHtml((local.lastSync && local.lastSync.at) || "尚未同步") + '</b></div>'
+    + '<div><span>自动备份</span><b>' + num(local.backup_count) + ' 份</b></div>'
+    + '</div>'
+    + (local.conflicts
+      ? '<div class="banner warn" style="margin-top:8px">有 ' + num(local.conflicts)
+        + ' 条同步冲突，云端和本机版本都已保留。</div>'
+        + (local.conflict_items || []).map(item => '<div class="today-ledger-row">'
+          + '<div><b>' + escapeHtml(item.table + ' · ' + (item.fields || []).join('、'))
+          + '</b><span>记录 ' + escapeHtml(item.key) + '</span></div>'
+          + '<div class="btn-row"><button class="identity-small-btn" data-conflict-local="'
+          + escapeHtml(item.id) + '">用本机</button>'
+          + '<button class="identity-small-btn" data-conflict-cloud="'
+          + escapeHtml(item.id) + '">用云端</button></div></div>').join("")
+      : "")
+    + (local.pullError ? '<div class="banner bad" style="margin-top:8px">拉取失败：'
+      + escapeHtml(local.pullError) + '</div>' : "")
+    + (local.failures || []).map(item => '<div class="today-ledger-row">'
+      + '<div><b>' + escapeHtml(item.table || "待上传") + '</b><span>'
+      + escapeHtml(item.error || "") + '</span></div></div>').join("")
+    + (local.legacy_available
+      ? '<div class="banner warn" style="margin-top:8px">发现旧版本未归属数据 '
+        + num((local.legacy_summary || {}).total || 0)
+        + ' 条，可手动确认导入当前账号。</div>'
+        + '<button class="btn ghost" id="btn-legacy-claim" style="width:100%;margin-top:8px">'
+        + '导入旧数据到当前账号</button>' : "")
+    + ((DB.projects || []).filter(item => !item.remote_id).length
+      ? '<div class="banner warn" style="margin-top:8px">本机有 '
+        + (DB.projects || []).filter(item => !item.remote_id).length
+        + ' 个项目尚未同步到公司。确认后才会上传，不会自动改动云端。</div>'
+        + '<button class="btn ghost" id="btn-local-projects" style="width:100%;margin-top:8px">'
+        + '确认为当前公司上传本机项目</button>' : "")
+    + '<div class="btn-row" style="margin-top:10px">'
+    + '<button class="btn ghost" id="btn-local-backup">立即备份</button>'
+    + '<button class="btn" id="btn-local-sync">立即同步</button></div>';
+
+  const bindLocalButtons = () => {
+    if ($("btn-local-backup")) {
+      $("btn-local-backup").onclick = () => {
+        try {
+          const key = backupCurrentDatabase("manual-diagnostic");
+          toast(key ? "本机数据已备份" : "当前没有可备份的数据");
+          runSystemDiagnosis();
+        } catch (error) { toast(String(error.message || error)); }
+      };
+    }
+    if ($("btn-legacy-claim")) {
+      $("btn-legacy-claim").onclick = () => {
+        if (!confirm("把旧版本本机数据导入当前账号？\n\n会先自动备份，旧队列不会自动上传。")) return;
+        claimLegacyDataForCurrentAccount();
+        runSystemDiagnosis();
+        toast("旧数据已导入当前账号");
+      };
+    }
+    document.querySelectorAll("[data-conflict-local]").forEach(button => {
+      button.onclick = async () => {
+        await resolveSyncConflict(button.dataset.conflictLocal, "local");
+        runSystemDiagnosis();
+      };
+    });
+    document.querySelectorAll("[data-conflict-cloud]").forEach(button => {
+      button.onclick = async () => {
+        await resolveSyncConflict(button.dataset.conflictCloud, "cloud");
+        runSystemDiagnosis();
+      };
+    });
+    if ($("btn-local-projects")) {
+      $("btn-local-projects").onclick = () => {
+        if (!confirm("把本机尚未同步的项目和步骤上传到当前公司？")) return;
+        queueLocalProjectsForCloud();
+        runSystemDiagnosis();
+      };
+    }
+    if ($("btn-local-sync")) {
+      $("btn-local-sync").onclick = async () => {
+        await syncNow("diagnostic");
+        runSystemDiagnosis();
+      };
+    }
+  };
+
+  if (!DB.profile) {
+    box.innerHTML = localHtml + '<div class="meta" style="margin-top:10px">登录后可继续检查云端数据库。</div>';
+    bindLocalButtons();
+    return;
+  }
+  if (!initCloud()) {
+    box.innerHTML = localHtml + '<div class="banner warn" style="margin-top:10px">云组件未加载，无法检查云端。</div>';
+    bindLocalButtons();
+    return;
+  }
+  box.innerHTML = localHtml + '<div class="meta" style="margin-top:10px">正在检查云端数据库…</div>';
+  bindLocalButtons();
+  try {
+    await ensureFreshCloudSession();
+    const { data, error } = await cloudClient.rpc("get_platform_health");
+    if (error) throw error;
+    const checks = Array.isArray(data && data.checks) ? data.checks : [];
+    const failed = checks.filter(item => !item.ok);
+    const migrations = Array.isArray(data && data.migrations) ? data.migrations.length : 0;
+    box.innerHTML = localHtml
+      + (failed.length
+        ? '<div class="banner bad">云端缺少 ' + failed.length + ' 项数据库功能。</div>'
+        : '<div class="banner good">云端账号、数据库和核心功能检查通过。</div>')
+      + '<div class="meta" style="margin-top:8px">已登记迁移 ' + migrations
+      + ' 项 · 服务器时间 ' + escapeHtml(String(data && data.server_time || "")) + '</div>'
+      + checks.map(item => '<div class="today-ledger-row"><div><b>'
+        + escapeHtml(item.label || item.key) + '</b></div><strong>'
+        + (item.ok ? "正常" : "缺失") + '</strong></div>').join("");
+  } catch (error) {
+    box.innerHTML = localHtml + '<div class="banner bad" style="margin-top:10px">云端诊断失败：'
+      + escapeHtml(String(error.message || error)) + '</div>';
+  }
+  bindLocalButtons();
+}
 function showBootError(title, detail) {
   const box = document.getElementById("boot-error");
   box.innerHTML = "<b>" + escapeHtml(title) + "</b>"
@@ -27,10 +172,27 @@ function showBootError(title, detail) {
 }
 
 function boot() {
-  DB = loadAll();
+  const lastAccountId = getSetting("last_account_id", "");
+  DB = loadAll(lastAccountId ? accountDatabaseKey(lastAccountId) : undefined);
+
+  /* Upgrade path: an old install has only the shared legacy database.
+     Create the account-owned database without moving business data. The
+     ownership prompt decides later whether old records belong to this user. */
+  if (currentDatabaseKey === DB_KEY && DB.profile && DB.profile.id) {
+    const legacyProfile = DB.profile;
+    ensureAccountDatabase(String(legacyProfile.id));
+    DB.profile = legacyProfile;
+    DB.account_scope_id = String(legacyProfile.id);
+    saveAll();
+  }
+
   applyTheme(getSetting("theme", "light"));
   makeNavScrollable();
   bindGlobalEvents();
+  if (typeof bindAppUpdateEvents === "function") bindAppUpdateEvents();
+  if (typeof checkForAppUpdate === "function") {
+    setTimeout(() => checkForAppUpdate(false), 1800);
+  }
 
   /* 进哪个页面：
 
@@ -56,7 +218,7 @@ function boot() {
   const status = syncStatus();
   if (status.signedIn) {
     resumeSession();
-    showPage(typeof mobileHomePage === "function" ? mobileHomePage() : "today");
+    const previewParams = new URLSearchParams(location.search); const requestedPage = previewParams.get("page"); const commentPreview = previewParams.get("v") === "comment-direct"; if (requestedPage === "community" || commentPreview) { showPage("community"); } else { showPage(typeof mobileHomePage === "function" ? mobileHomePage() : "today"); }
 
     /* **启动时核对一次登录会话。**
 
@@ -155,25 +317,132 @@ function setBanner(element, text, kind) {
 
 /* 底部导航要占位置，所以这些页面的 body 要留出底部空间。
    登录页和派任务页没有导航，不用留。 */
+function updateNavScrollCue() {
+  const nav = $("nav");
+  const cue = $("nav-scroll-cue");
+  if (!nav || !cue) return;
+  const maxScroll = Math.max(0, nav.scrollWidth - nav.clientWidth);
+  const canScroll = maxScroll > 2;
+  nav.classList.toggle("scrollable", canScroll);
+  cue.classList.toggle("hidden", !canScroll);
+  if (!canScroll) return;
+
+  const atStart = nav.scrollLeft <= 2;
+  const atEnd = nav.scrollLeft >= maxScroll - 2;
+  cue.textContent = atStart ? "›" : atEnd ? "‹" : "↔";
+  cue.title = atStart ? "向右拖动查看更多入口"
+            : atEnd ? "向左拖动返回前面的入口"
+            : "左右拖动查看更多入口";
+}
+
+/* 电脑预览没有手机触屏，补一套鼠标拖动和滚轮横滑。
+   触摸设备继续走浏览器原生横滑，不抢它的手势。 */
+function enableNavDrag() {
+  const nav = $("nav");
+  if (!nav || nav.dataset.dragReady === "1") return;
+  nav.dataset.dragReady = "1";
+
+  let pointerId = null;
+  let startX = 0;
+  let startScroll = 0;
+  let dragged = false;
+  let suppressClick = false;
+
+  const finishPointer = event => {
+    if (pointerId === null || (event && event.pointerId !== pointerId)) return;
+    if (nav.hasPointerCapture && nav.hasPointerCapture(pointerId)) {
+      nav.releasePointerCapture(pointerId);
+    }
+    pointerId = null;
+    nav.classList.remove("nav-dragging");
+    if (dragged) {
+      suppressClick = true;
+      window.setTimeout(() => { suppressClick = false; }, 0);
+    }
+    updateNavScrollCue();
+  };
+
+  nav.addEventListener("pointerdown", event => {
+    if (event.pointerType === "touch" || event.button !== 0) return;
+    if (nav.scrollWidth <= nav.clientWidth + 1) return;
+    pointerId = event.pointerId;
+    startX = event.clientX;
+    startScroll = nav.scrollLeft;
+    dragged = false;
+  });
+
+  nav.addEventListener("pointermove", event => {
+    if (pointerId === null || event.pointerId !== pointerId) return;
+    const distance = event.clientX - startX;
+    if (!dragged && Math.abs(distance) > 5) {
+      dragged = true;
+      nav.classList.add("nav-dragging");
+      try { nav.setPointerCapture(pointerId); } catch (_) {}
+    }
+    if (!dragged) return;
+    event.preventDefault();
+    nav.scrollLeft = startScroll - distance;
+    updateNavScrollCue();
+  });
+
+  nav.addEventListener("pointerup", finishPointer);
+  nav.addEventListener("pointercancel", finishPointer);
+  nav.addEventListener("lostpointercapture", finishPointer);
+  nav.addEventListener("dragstart", event => event.preventDefault());
+
+  nav.addEventListener("click", event => {
+    if (!suppressClick) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+
+  nav.addEventListener("wheel", event => {
+    const maxScroll = Math.max(0, nav.scrollWidth - nav.clientWidth);
+    if (maxScroll <= 2) return;
+    const raw = Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      ? event.deltaX : event.deltaY;
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? nav.clientWidth : 1;
+    const before = nav.scrollLeft;
+    nav.scrollLeft += raw * unit;
+    if (nav.scrollLeft !== before) {
+      event.preventDefault();
+      updateNavScrollCue();
+    }
+  }, { passive: false });
+
+  nav.addEventListener("scroll", updateNavScrollCue, { passive: true });
+  window.addEventListener("resize", updateNavScrollCue);
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(updateNavScrollCue).observe(nav);
+  }
+  updateNavScrollCue();
+}
+
 function makeNavScrollable() {
-  ["page-today", "page-dash", "page-team", "page-assist", "page-identity",
-   "page-tasks", "page-community", "page-me"].forEach(id => {
+  ["page-today", "page-decisions", "page-operations", "page-execution", "page-intake",
+   "page-dash", "page-team",
+   "page-assist", "page-identity", "page-companies", "page-tasks", "page-community",
+   "page-me"].forEach(id => {
     $(id).classList.add("has-nav");
   });
+  enableNavDrag();
 }
 
 /*: 所有页面。加新页面必须登记在这里——
      漏了的话页面永远显示不出来，而且不报错，很难查。 */
-const PAGES = ["login", "today", "dash", "project", "tasks", "team", "assist",
-               "identity", "community", "assign", "staff", "me"];
+const PAGES = ["login", "today", "decisions", "operations", "execution", "intake", "dash",
+               "project", "tasks", "team", "assist", "identity", "companies",
+               "community", "assign", "staff", "me"];
 
 function showPage(name) {
   const target = PAGES.indexOf(name) === -1 ? "dash" : name;
   PAGES.forEach(key => {
     $("page-" + key).classList.toggle("hidden", key !== target);
   });
+  const morePages = ["dash", "team", "assist", "identity", "companies", "community", "today", "me"];
   document.querySelectorAll("#nav button").forEach(button => {
-    button.classList.toggle("on", button.dataset.page === target);
+    const isMore = button.dataset.page === "more" && morePages.indexOf(target) !== -1;
+    button.classList.toggle("on", button.dataset.page === target || isMore);
   });
 
   /* 登录页不显示底部导航——还没登录，那些页面一个都进不去。
@@ -192,6 +461,31 @@ function showPage(name) {
     renderToday();
     if (typeof refreshPointState === "function") refreshPointState(false);
   }
+  if (target === "decisions") {
+    renderDecisionCenter();
+    loadDecisionCenter(true);
+  }
+  if (target === "operations") {
+    renderOperations();
+    loadOperations(true);
+  }
+  if (target === "execution") {
+    renderExecution();
+    loadExecution(true);
+  }
+  if (target === "intake") {
+    renderIntake();
+    loadIntake(true);
+  }
+  if (target === "dash" || target === "today") {
+    if (typeof pullCloudProjects === "function") {
+      pullCloudProjects().then(result => {
+        if (!result || result.error || currentPageName() !== target) return;
+        if (target === "dash") renderDash();
+        else renderToday();
+      }).catch(() => {});
+    }
+  }
   if (target === "dash") renderDash();
   if (target === "team") renderTeam();
   if (target === "assist") renderAssist();
@@ -201,6 +495,11 @@ function showPage(name) {
   if (target === "identity") {
     renderIdentity();
     if (typeof refreshIdentity === "function") refreshIdentity(false);
+    if (typeof loadShareholderMeetings === "function") loadShareholderMeetings(false);
+  }
+  if (target === "companies") {
+    renderMyCompanies();
+    loadMyCompanies(true);
   }
   if (target === "community") renderCommunity();
   if (target === "me") renderMe();
@@ -317,6 +616,7 @@ function renderMe() {
   }
 
   $("me-boss-extras").classList.toggle("hidden", !isBoss);
+  if (typeof renderMyPerformance === "function") renderMyPerformance();
 
   /* 通知相关的提示。
      两种情况要说清楚，不然用户只会觉得"怎么没通知"：
@@ -484,18 +784,88 @@ function closeSheet() {
   sheetSubmit = null;
 }
 
+function openNavMore() {
+  const items = [
+    ["shares", "股份"], ["companies", "我的公司"], ["dash", "看板"], ["team", "团队"], ["assist", "助手"],
+    ["identity", "治理"], ["community", "星球"],
+    ["today", "今天"], ["me", "我的"],
+  ];
+  openSheet("更多功能", `
+    <div id="nav-more-grid" class="nav-more-grid">
+      ${items.map(([page, label]) => `
+        <button class="btn ghost nav-more-item" data-more-page="${page}">${label}</button>
+      `).join("")}
+    </div>
+  `, [{ label: "关闭", onClick: closeSheet }]);
+  $("nav-more-grid").onclick = event => {
+    const button = event.target.closest("[data-more-page]");
+    if (!button) return;
+    const page = button.dataset.morePage;
+    closeSheet();
+    if (page === "shares") {
+      if (typeof openShareDashboard === "function") openShareDashboard();
+      return;
+    }
+    showPage(page);
+  };
+}
+
 function bindGlobalEvents() {
+  if ($("btn-my-companies-refresh")) {
+    $("btn-my-companies-refresh").onclick = () => loadMyCompanies(true);
+  }
+  if ($("btn-org-health")) {
+    $("btn-org-health").onclick = () => loadOrganizationHealth();
+  }
+  if ($("btn-org-repair")) {
+    $("btn-org-repair").onclick = () => repairMyOrganizationFromUI();
+  }
+
+  if ($("btn-check-update")) {
+    $("btn-check-update").onclick = () => checkForAppUpdate(true);
+  }
+
   $("sheet").addEventListener("click", event => {
     if (event.target.dataset.close) closeSheet();
   });
 
   document.querySelectorAll("#nav button").forEach(button => {
-    button.onclick = () => showPage(button.dataset.page);
+    button.onclick = () => {
+      if (button.dataset.page === "more") {
+        openNavMore();
+        return;
+      }
+      showPage(button.dataset.page);
+    };
   });
 
   /* 社区的两个固定按钮在这里统一接线。 */
-  $("btn-community-refresh").onclick = () => loadCommunityPosts(true);
+  $("btn-community-refresh").onclick = async () => {
+    await loadCommunityBoards(true);
+    await loadCommunityPosts(true);
+    loadCommunityNotifications(true);
+  };
   $("btn-identity-refresh").onclick = () => refreshIdentity(true);
+  $("btn-decisions-refresh").onclick = () => loadDecisionCenter(true);
+  if (typeof bindDecisionCenter === "function") bindDecisionCenter();
+  if (typeof bindExecution === "function") bindExecution();
+  if (typeof bindIntake === "function") bindIntake();
+  if ($("btn-operations-refresh")) {
+    $("btn-operations-refresh").onclick = () => loadOperations(true);
+  }
+  if ($("btn-my-performance")) {
+    $("btn-my-performance").onclick = async () => {
+      const box = $("my-performance");
+      if (!box) return;
+      const opening = box.classList.contains("hidden");
+      box.classList.toggle("hidden", !opening);
+      if (opening) {
+        box.innerHTML = '<div class="meta">正在读取绩效依据…</div>';
+        await loadMyPerformanceEvidence(true);
+      }
+    };
+  }
+  if (typeof bindOperations === "function") bindOperations();
   $("btn-community-send").onclick = () => submitCommunityPost();
 
   /* **按下任何按钮都轻震一下。**
@@ -538,7 +908,7 @@ function bindGlobalEvents() {
     showPage(DB.profile && DB.profile.role === "employee" ? "tasks" : "dash");
   };
   $("btn-switch-account").onclick = () => {
-    cloudLogout().then(() => { renderLogin(); toast("请输入新账号"); });
+    switchAccount().then(() => { renderLogin(); toast("请输入新账号"); });
   };
 
   /* ---- 员工任务页 ---- */
@@ -572,6 +942,7 @@ function bindGlobalEvents() {
         : (status.pending ? `还有 ${status.pending} 条待上传` : "已同步"));
     });
   };
+  $("btn-system-diagnose").onclick = runSystemDiagnosis;
   $("btn-me-logout").onclick = logout;
   /* 账号管理。两种身份都要用，所以放在 me-boss-extras 外面。 */
   $("btn-me-password").onclick = openChangePassword;
@@ -587,6 +958,7 @@ function bindGlobalEvents() {
     showPage("me");
     toast("已切到" + (next === "dark" ? "深色" : "浅色"));
   };
+  $("btn-me-companies").onclick = () => showPage("companies");
   $("btn-me-accounts").onclick = () => showPage("staff");
 
   /* 新加的四项：开工、兑换、请假、商品管理。
@@ -652,7 +1024,13 @@ function bindGlobalEvents() {
   };
 
   /* 团队 */
-  $("btn-new-employee").onclick = () => editEmployee(null);
+  $("btn-new-employee").onclick = () => {
+    if (typeof openInviteOrganizationMember === "function") {
+      openInviteOrganizationMember();
+    } else {
+      editEmployee(null);
+    }
+  };
   $("btn-new-worklog").onclick = () => editWorklog(null);
 
   /* 小助手 */
@@ -811,11 +1189,118 @@ const AVATARS = {
   watch:   "09_暗中观察",  // 等待输入
 };
 
+const STAR_STICKERS = [
+  { id: "hug", file: "star_01_hug", label: "抱抱", message: "先接住自己，再处理事情。" },
+  { id: "roger", file: "star_02_roger", label: "收到", message: "收到，我来把这件事落到下一步。" },
+  { id: "tea", file: "star_03_tea", label: "喝茶", message: "缓一口气，节奏比速度重要。" },
+  { id: "work", file: "star_04_work", label: "工作中", message: "进入专注轨道，先完成最小的一步。" },
+  { id: "wow", file: "star_05_wow", label: "惊讶", message: "有变化就先核对，不急着下结论。" },
+  { id: "hmph", file: "star_06_hmph", label: "哼", message: "可以不同意，但把理由写清楚。" },
+  { id: "sleep", file: "star_07_sleep", label: "睡觉", message: "今天到这里，休息也是进度。" },
+  { id: "great", file: "star_08_great", label: "太好了", message: "一切在变好，继续保持现在的节奏。" },
+  { id: "music", file: "star_09_music", label: "听歌", message: "给自己一段不被打断的时间。" },
+  { id: "read", file: "star_10_read", label: "看书", message: "先找依据，再决定下一步。" },
+  { id: "yum", file: "star_11_yum", label: "好吃", message: "补充能量，才有力气继续。" },
+  { id: "meow", file: "star_12_meow", label: "喵", message: "允许自己可爱一点，也允许事情慢一点。" },
+  { id: "out", file: "star_13_out", label: "想出去", message: "想离开一下没关系，回来再继续。" },
+  { id: "what", file: "star_14_what", label: "疑惑", message: "没想清楚就先标记问题，不用硬猜。" },
+  { id: "tired", file: "star_15_tired", label: "好累", message: "累不是失败，今天只做必要的事。" },
+  { id: "bye", file: "star_16_bye", label: "下次见", message: "收好今天的进度，下次接着来。" },
+];
+
+const STAR_MOOD_FILES = {
+  neutral: "star_03_tea",
+  happy: "star_08_great",
+  sleepy: "star_07_sleep",
+  puzzled: "star_14_what",
+  warn: "star_06_hmph",
+  alarm: "star_05_wow",
+  warm: "star_01_hug",
+  ok: "star_02_roger",
+  watch: "star_10_read",
+};
+
+const STAR_MOOD_IDS = {
+  neutral: "tea", happy: "great", sleepy: "sleep", puzzled: "what",
+  warn: "hmph", alarm: "wow", warm: "hug", ok: "roger", watch: "read",
+};
+
+function starStickerById(id) {
+  return STAR_STICKERS.find(item => item.id === id) || null;
+}
+
+function starForMood(mood) {
+  return starStickerById(STAR_MOOD_IDS[mood] || "hug") || STAR_STICKERS[0];
+}
+
+function starStickerSrc(star) {
+  const item = typeof star === "string" ? starStickerById(star) : star;
+  return item ? `icons/star/${item.file}.webp` : "icons/star/star_01_hug.webp";
+}
+
+function starFaceSrc(star) {
+  const item = typeof star === "string" ? starStickerById(star) : star;
+  return item ? `icons/star/${item.file}@face.webp` : "icons/star/star_01_hug@face.webp";
+}
+
+function starStickerSettingKey() {
+  return "star_sticker_" + String(DB.account_scope_id
+    || (DB.profile && DB.profile.id) || "device");
+}
+
+function selectedStarSticker() {
+  const id = getSetting(starStickerSettingKey(), "");
+  return starStickerById(String(id || ""));
+}
+
+function renderStarCompanion(mood) {
+  const box = $("star-companion");
+  if (!box) return;
+  const manual = selectedStarSticker();
+  const active = manual || starForMood(mood);
+  box.innerHTML = `
+    <div class="star-companion-head">
+      <div>
+        <div class="star-kicker"> 星轨陪伴</div>
+        <h3>今天想以什么状态出现？</h3>
+      </div>
+      ${manual ? '<button class="star-auto" data-star-auto="1">跟随状态</button>' : ""}
+    </div>
+    <div class="star-strip" role="list">
+      ${STAR_STICKERS.map(item => `
+        <button class="star-chip${item.id === active.id ? " active" : ""}"
+          data-star-id="${escapeHtml(item.id)}" role="listitem"
+          aria-pressed="${item.id === active.id ? "true" : "false"}"
+          title="${escapeHtml(item.message)}">
+          <img src="${starFaceSrc(item)}" alt="${escapeHtml(item.label)}" loading="lazy">
+          <span>${escapeHtml(item.label)}</span>
+        </button>`).join("")}
+    </div>
+    <div class="star-message">
+      <img src="${starFaceSrc(active)}" alt="">
+      <div><b>${escapeHtml(active.label)}</b><span>${escapeHtml(active.message)}</span></div>
+    </div>`;
+  box.querySelectorAll("[data-star-id]").forEach(button => {
+    button.onclick = () => {
+      saveSetting(starStickerSettingKey(), button.dataset.starId);
+      renderDash();
+    };
+  });
+  if (box.querySelector("[data-star-auto]")) {
+    box.querySelector("[data-star-auto]").onclick = () => {
+      saveSetting(starStickerSettingKey(), "");
+      renderDash();
+    };
+  }
+}
+
 function faceSrc(key) {
+  if (STAR_MOOD_FILES[key]) return `icons/star/${STAR_MOOD_FILES[key]}@face.webp`;
   return "icons/" + (AVATARS[key] || AVATARS.neutral) + ".webp";
 }
 
 function heroSrc(key) {
+  if (STAR_MOOD_FILES[key]) return `icons/star/${STAR_MOOD_FILES[key]}.webp`;
   return "icons/" + (AVATARS[key] || AVATARS.neutral) + "@hero.webp";
 }
 
@@ -1163,7 +1648,7 @@ function renderTeamCard() {
   const card = $("team-card");
   if (!card) return;
   const profile = DB.profile;
-  if (!profile || profile.role !== "boss") {
+  if (!profile || !identityHasManagementView()) {
     card.classList.add("hidden");
     return;
   }
@@ -1307,9 +1792,26 @@ function employeeNameOf(profileId) {
   const account = (DB.staffAccounts || []).find(item =>
     String(item.employee_id) === id);
   if (account && account.name) return account.name;
+  const member = (DB.identity && Array.isArray(DB.identity.members)
+    ? DB.identity.members : [])
+    .find(item => String(item.profile_id) === id);
+  if (member && member.name) return member.name;
   const employee = (DB.employees || []).find(item => String(item.id) === id);
   if (employee && employee.name) return employee.name;
   return "员工 " + id.slice(0, 6);
+}
+
+function renderDataFreshnessBanner() {
+  const box = $("dash-banner");
+  if (!box) return false;
+  const error = String(DB.pullError || "").trim();
+  const localOnly = (DB.projects || []).filter(item => !item.remote_id).length;
+  if (!error && !localOnly) return false;
+  const text = error
+    ? "数据可能不是最新：" + error
+    : `本机有 ${localOnly} 个项目尚未同步到公司，请到系统诊断确认上传。`;
+  setBanner(box, text, "warn");
+  return true;
 }
 
 function renderDash() {
@@ -1351,8 +1853,12 @@ function renderDash() {
      这句话是**对当前状态的判断**，不是欢迎语——
      看一眼就知道今天要不要操心。 */
   const mood = dashboardMood(rows, bad);
-  $("dash-hero-art").src = heroSrc(mood);
-  $("dash-hero-line").textContent = heroLine(mood, rows, bad, weekHours, range);
+  const chosenStar = selectedStarSticker();
+  $("dash-hero-art").src = chosenStar ? starStickerSrc(chosenStar) : heroSrc(mood);
+  $("dash-hero-line").textContent = chosenStar
+    ? chosenStar.message
+    : heroLine(mood, rows, bad, weekHours, range);
+  renderStarCompanion(mood);
 
   /* 近两周工时折线。**画的是"每天多少小时"而不是累计**——
      累计曲线永远是往上的，看不出节奏；
@@ -1384,6 +1890,7 @@ function renderDash() {
     if (problems.length) {
       setBanner($("dash-banner"), problems[0].text, "warn");
     }
+    renderDataFreshnessBanner();
     return;
   }
 
@@ -1430,6 +1937,7 @@ function renderDash() {
     setBanner($("dash-banner"),
       `${problems.length} 处工时异常：${problems[0].text}`, "warn");
   }
+  renderDataFreshnessBanner();
 }
 
 /* ============================================================
@@ -1889,11 +2397,72 @@ function editMetric(projectId, metricId) {
 /* ============================================================
    团队
    ============================================================ */
+function enterpriseMemberRows() {
+  const members = (DB.identity && Array.isArray(DB.identity.members)
+    ? DB.identity.members : [])
+    .filter(item => item && String(item.status || "active") !== "inactive");
+  const byId = new Map();
+  (DB.employees || []).forEach(item => {
+    byId.set(String(item.id), { source: "local", item });
+  });
+  members.forEach(item => {
+    byId.set(String(item.profile_id), { source: "member", item });
+  });
+  return Array.from(byId.values()).map(entry => {
+    const m = entry.item;
+    if (entry.source === "local") {
+      return {
+        id: m.id,
+        profile_id: null,
+        name: m.name,
+        role: m.role || "",
+        level: m.level || "",
+        weekly_hours: num(m.weekly_hours) || 40,
+      };
+    }
+    return {
+      id: m.profile_id,
+      profile_id: m.profile_id,
+      name: m.name || "未命名成员",
+      role: m.role_name
+        || (typeof identityRoleLabel === "function" ? identityRoleLabel(m.role_key) : m.role_key),
+      level: [m.department, m.title].filter(Boolean).join(" / "),
+      weekly_hours: 40,
+      active: true,
+    };
+  });
+}
+
+function teamMemberRows(range) {
+  const hoursByMember = {};
+  worklogsFor({ date_from: range.from, date_to: range.to, includeRemote: true })
+    .forEach(log => {
+      const key = String(log.employee_id || "");
+      if (!key) return;
+      hoursByMember[key] = (hoursByMember[key] || 0) + num(log.hours);
+    });
+  const rows = enterpriseMemberRows().map(item => {
+    const hours = hoursByMember[String(item.id)] || 0;
+    const expected = Math.max(1, num(item.weekly_hours) / 7 * range.days);
+    return Object.assign({}, item, {
+      hours,
+      expected,
+      ratio: hours / expected,
+    });
+  }).sort((a, b) => b.hours - a.hours);
+  if (rows.length) return rows;
+  return loadRows().rows.map(row => Object.assign({}, row, {
+    id: row.id, profile_id: null, active: true,
+  }));
+}
+
 function renderTeam() {
-  const { rows, window: range } = loadRows();
+  const windowRange = loadRows().window;
+  const rows = teamMemberRows(windowRange);
+  const range = windowRange;
   /* 条数要把云端的一起算——否则员工报了一堆工时，
      这里还显示"0 条工时"，看起来像没收到。 */
-  $("team-sub").textContent = `${activeEmployees().length} 人在岗 · `
+  $("team-sub").textContent = `${rows.length} 人在岗 · `
     + `${fetchWorklogs().length} 条工时`;
   $("load-range").textContent = `最近 ${range.days} 天`;
 
@@ -1937,17 +2506,17 @@ function renderTeam() {
 
   /* 员工列表 + 工时列表合并在一页，手机上滚动比切页方便 */
   const employeeHtml = rows.length ? rows.map(row => `
-    <div class="list-item tap" data-employee="${row.id}">
+    <div class="list-item tap" data-employee="${escapeHtml(String(row.id))}">
       <div class="row">
         <div class="grow"><span class="title">${escapeHtml(row.name)}</span>
-          <div class="meta">${escapeHtml(row.role || "未填岗位")}
+          <div class="meta">${escapeHtml(row.role || "普通员工")}
             ${row.level ? " · " + escapeHtml(row.level) : ""}</div></div>
         <b class="${row.ratio > 1 ? "lv-风险" : ""}">
           ${Math.round(row.ratio * 100)}%</b>
       </div>
-      <div class="meta">${row.hours.toFixed(1)} 小时 / 应出 `
-        + `${row.expected.toFixed(0)} 小时</div>
-    </div>`).join("") : '<div class="meta">还没有员工。</div>';
+      <div class="meta">${Number(row.hours || 0).toFixed(1)} 小时 / 应出 `
+        + `${Number(row.expected || 0).toFixed(0)} 小时</div>
+    </div>`).join("") : '<div class="meta">还没有成员，先邀请同事加入公司。</div>';
 
   /* 团队页的工时列表要带上云端——员工报的必须出现在这里，
      否则老板看到的是"没人干活"。云端记录用只读方式展示。 */
@@ -1982,10 +2551,16 @@ function renderTeam() {
   body.appendChild(block);
 
   block.querySelectorAll("[data-employee]").forEach(node => {
-    node.onclick = () => editEmployee(Number(node.dataset.employee));
+    const id = String(node.dataset.employee);
+    const member = enterpriseMemberRows().find(item => String(item.id) === id);
+    if (member && member.profile_id && !getEmployee(id)) {
+      toast("这位是公司成员，岗位调整请在治理页面进行");
+      return;
+    }
+    editEmployee(Number(id));
   });
   block.querySelectorAll("[data-worklog]").forEach(node => {
-    node.onclick = () => editWorklog(Number(node.dataset.worklog));
+    node.onclick = () => editWorklog(String(node.dataset.worklog));
   });
 }
 
@@ -2044,50 +2619,93 @@ function editEmployee(id) {
 /* ============================================================
    工时表单
    ============================================================ */
-function editWorklog(id) {
-  if (!activeEmployees().length) {
+async function editWorklog(id) {
+  if (!id && !enterpriseMemberRows().length) {
     toast("先加一个员工");
     editEmployee(null);
     return;
   }
-  const log = id ? DB.worklogs.find(row => row.id === Number(id)) : null;
+  const localLog = id ? DB.worklogs.find(
+    row => String(row.id) === String(id)) : null;
+  const cloudLog = id ? (DB.remoteWorklogs || []).find(
+    row => String(row.id) === String(id)) : null;
+  const log = localLog || cloudLog || null;
   if (id && !log) { toast("这条工时已经不存在了"); return; }
   const isNew = !log;
-  const draft = log || { work_date: todayISO(), hours: 8, source: "manual" };
+  const cloudOnly = !!cloudLog && !localLog;
+  const draft = Object.assign(
+    { work_date: todayISO(), hours: 8, source: "manual" },
+    log || {}
+  );
+  if (cloudOnly && typeof loadWorklogDimensions === "function") {
+    Object.assign(draft, await loadWorklogDimensions(cloudLog));
+  }
+  const locked = cloudOnly ? " disabled" : "";
+  const memberRows = enterpriseMemberRows();
+  let employeeOptions = memberRows.map(row =>
+    `<option value="${escapeHtml(String(row.id))}"`
+      + (String(draft.employee_id) === String(row.id) ? " selected" : "")
+      + `>${escapeHtml(row.name)}</option>`).join("");
+  /* 正在改一条云端来源的工时，其 employee_id 可能已不在当前名单里，
+     这里补一个只读占位，否则下拉框会变空。 */
+  if (draft.employee_id
+      && !memberRows.some(row => String(row.id) === String(draft.employee_id))) {
+    employeeOptions = `<option value="${escapeHtml(String(draft.employee_id))}" selected>`
+      + `${escapeHtml(employeeNameOf(draft.employee_id))}</option>` + employeeOptions;
+  }
+  const projectOptions = DB.projects.map(project =>
+    `<option value="${project.id}"`
+      + (String(draft.project_id) === String(project.id) ? " selected" : "")
+      + `>${escapeHtml(project.name)}</option>`).join("");
 
   openSheet(isNew ? "记一笔工时" : "修改工时", `
+    ${cloudOnly ? '<div class="hint">这条是云端来源工时。基础字段保持只读；经营标签会通过权限校验后单独保存。</div>' : ""}
     <label for="w-employee">谁</label>
-    <select id="w-employee">${activeEmployees().map(employee =>
-      `<option value="${employee.id}"`
-      + (draft.employee_id === employee.id ? " selected" : "")
-      + `>${escapeHtml(employee.name)}</option>`).join("")}</select>
+    <select id="w-employee"${locked}>${employeeOptions}</select>
     <label for="w-project">项目</label>
-    <select id="w-project"><option value="">（非项目事务）</option>
-      ${DB.projects.map(project =>
-        `<option value="${project.id}"`
-        + (draft.project_id === project.id ? " selected" : "")
-        + `>${escapeHtml(project.name)}</option>`).join("")}</select>
+    <select id="w-project"${locked}><option value="">（非项目事务）</option>
+      ${projectOptions}</select>
     <label for="w-step">步骤（可选）</label>
-    <select id="w-step"></select>
+    <select id="w-step"${locked}></select>
     <div class="row2">
       <div><label for="w-date">日期</label>
-        <input id="w-date" type="date" value="${escapeHtml(draft.work_date || todayISO())}"></div>
+        <input id="w-date" type="date" value="${escapeHtml(draft.work_date || todayISO())}"${locked}></div>
       <div><label for="w-hours">工时</label>
         <input id="w-hours" type="number" step="0.5" min="0.5" max="24"
-               value="${num(draft.hours) || 8}"></div>
+               value="${num(draft.hours) || 8}"${locked}></div>
     </div>
     <label for="w-content">做了什么</label>
-    <textarea id="w-content">${escapeHtml(draft.content || "")}</textarea>
+    <textarea id="w-content"${locked}>${escapeHtml(draft.content || "")}</textarea>
+    <div class="section-head" style="margin-top:14px"><span>经营标签</span>
+      <span class="meta">默认已选好，按实际情况调整</span></div>
+    <div class="check-grid">
+      <label class="check"><input type="checkbox" id="w-billable"
+        ${draft.billable === false ? "" : "checked"}>可计费</label>
+      <label class="check"><input type="checkbox" id="w-overtime"
+        ${draft.overtime ? "checked" : ""}>加班</label>
+      <label class="check"><input type="checkbox" id="w-rework"
+        ${draft.rework ? "checked" : ""}>返工</label>
+      <label class="check"><input type="checkbox" id="w-waiting"
+        ${draft.waiting ? "checked" : ""}>等待</label>
+      <label class="check"><input type="checkbox" id="w-travel"
+        ${draft.travel ? "checked" : ""}>出差</label>
+    </div>
+    <label for="w-kind">工作类型</label>
+    <select id="w-kind">
+      <option value="project"${draft.work_kind === "project" || !draft.work_kind ? " selected" : ""}>项目</option>
+      <option value="presales"${draft.work_kind === "presales" ? " selected" : ""}>售前</option>
+      <option value="internal"${draft.work_kind === "internal" ? " selected" : ""}>内部</option>
+    </select>
     ${log && log.source === "timer"
       ? '<div class="hint">这条是计时器记的。改小时数等于推翻了计时结论，'
         + "改之前先想一下是不是该重新解释。</div>" : ""}
   `, [
     { label: "取消", onClick: closeSheet },
-    ...(isNew ? [] : [{ label: "删除", kind: "danger", onClick: () => {
+    ...(isNew || cloudOnly ? [] : [{ label: "删除", kind: "danger", onClick: () => {
       if (!confirm("确定删除这条工时？")) return;
       deleteWorklog(id); closeSheet(); renderTeam(); toast("已删除");
     } }]),
-    { label: "保存", kind: "", onClick: () => saveWorklog(id) },
+    { label: "保存", kind: "", onClick: () => saveWorklog(id || null) },
   ]);
 
   $("w-project").onchange = () =>
@@ -2111,14 +2729,22 @@ function saveWorklog(id) {
     work_date: $("w-date").value,
     hours: $("w-hours").value,
     content: $("w-content").value,
+    billable: $("w-billable").checked,
+    overtime: $("w-overtime").checked,
+    work_kind: $("w-kind").value,
+    rework: $("w-rework").checked,
+    waiting: $("w-waiting").checked,
+    travel: $("w-travel").checked,
   };
   try {
     if (id) {
-      updateWorklog(id, data);
+      const saved = updateWorklog(id, data);
+      syncWorklogDimensions(saved);
       closeSheet(); renderTeam(); toast("已保存");
       return;
     }
-    addWorklog(data, { allowDuplicate: false });
+    const saved = addWorklog(data, { allowDuplicate: false });
+    syncWorklogDimensions(saved);
     closeSheet(); renderTeam(); toast("已记录");
   } catch (error) {
     /* 重复的提示带前缀，单独处理——要问用户是否继续 */
@@ -2127,7 +2753,8 @@ function saveWorklog(id) {
       if (confirm(`已经有一样的记录了：\n${detail}\n\n`
           + "如果确实是两段分开的工作，就继续记。")) {
         try {
-          addWorklog(data, { allowDuplicate: true });
+          const saved = addWorklog(data, { allowDuplicate: true });
+          syncWorklogDimensions(saved);
           closeSheet(); renderTeam(); toast("已记录");
         } catch (second) { toast(second.message); }
       }
