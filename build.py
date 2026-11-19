@@ -34,7 +34,13 @@ BUNDLED = [
     ("README.md", "."),
     ("preview.html", "."),
     ("mobile/sql/community.sql", "."),
+    ("mobile/sql/community-forum-v1.sql", "."),
+    ("mobile/sql/organization-founders-v1.sql", "."),
+    ("mobile/sql/platform-stability-v1.sql", "."),
+    ("mobile/sql/community-identity-v1.sql", "."),
     ("mobile/sql/unified-platform.sql", "."),
+    ("mobile/sql/work-intake-v1.sql", "."),
+    ("mobile/sql/shareholder-meetings-v1.sql", "."),
     ("assets/app_icon.ico", "assets"),
     ("assets/app_icon.png", "assets"),
 ]
@@ -56,7 +62,8 @@ HIDDEN = [
     "db", "rules", "theme", "widgets", "chart", "detail", "export", "metrics",
     "server", "server_pages", "submit", "timer", "timer_ui",
     "knowledge_planet", "community_client", "community_ui",
-    "cloud_integration", "collaboration",
+    "cloud_integration", "collaboration", "intake_rules", "intake_ui",
+    "meeting_rules", "meeting_ui", "organization_ui", "qrcode", "PIL",
 ]
 
 

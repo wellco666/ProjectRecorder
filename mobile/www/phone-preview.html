@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>项目记录器 · 工作冒险手账</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 18% 12%, rgba(200,154,75,.14), transparent 30%),
+        radial-gradient(circle at 82% 68%, rgba(63,143,123,.20), transparent 34%),
+        linear-gradient(rgba(175,206,194,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(175,206,194,.035) 1px, transparent 1px),
+        #0d1716;
+      background-size: auto, auto, 30px 30px, 30px 30px, auto;
+      color: #eaf2ed;
+      font: 14px/1.4 "Microsoft YaHei UI", "PingFang SC", sans-serif;
+    }
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      border: 1px solid rgba(222,190,119,.12);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    body::before {
+      width: 520px;
+      height: 520px;
+      left: -240px;
+      top: -220px;
+      box-shadow: 0 0 0 44px rgba(255,255,255,.012),
+                  0 0 0 92px rgba(200,154,75,.012);
+    }
+    body::after {
+      width: 420px;
+      height: 420px;
+      right: -200px;
+      bottom: -210px;
+      box-shadow: 0 0 0 38px rgba(111,184,162,.018);
+    }
+    .wrap {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      gap: 14px;
+      justify-items: center;
+      padding: 20px;
+    }
+    .caption {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: #d6e2dc;
+      font-size: 12px;
+      letter-spacing: .08em;
+    }
+    .caption::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #d9b568;
+      box-shadow: 0 0 0 4px rgba(217,181,104,.10);
+    }
+    .caption b {
+      color: #f5e6bd;
+      font-weight: 700;
+    }
+    .phone {
+      width: min(390px, 96vw);
+      height: min(844px, calc(100vh - 100px));
+      padding: 10px;
+      overflow: hidden;
+      border-radius: 38px;
+      border: 1px solid rgba(221,190,122,.25);
+      background: linear-gradient(145deg, #2b403a, #14211e 52%, #2b251c);
+      box-shadow:
+        0 38px 100px rgba(0,0,0,.66),
+        0 0 0 1px rgba(255,255,255,.05),
+        inset 0 0 0 1px rgba(255,255,255,.05);
+      position: relative;
+    }
+    .phone::before {
+      content: "";
+      position: absolute;
+      z-index: 2;
+      top: 11px;
+      left: 50%;
+      width: 108px;
+      height: 22px;
+      transform: translateX(-50%);
+      border-radius: 0 0 14px 14px;
+      background: #090d0c;
+      box-shadow: 0 4px 12px rgba(0,0,0,.34);
+    }
+    .phone::after {
+      content: "";
+      position: absolute;
+      z-index: 2;
+      top: 22px;
+      left: calc(50% + 34px);
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: #213a33;
+      box-shadow: inset 0 0 2px rgba(255,255,255,.2);
+    }
+    iframe {
+      width: 116.279%;
+      height: 116.279%;
+      border: 0;
+      border-radius: 28px;
+      background: #f2f6f3;
+      transform: scale(.86);
+      transform-origin: top left;
+    }
+    .hint {
+      color: #718b82;
+      font-size: 10px;
+      letter-spacing: .04em;
+    }
+    .preview-tools {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .preview-tools button {
+      border: 1px solid rgba(221,190,122,.28);
+      border-radius: 999px;
+      background: rgba(255,255,255,.06);
+      color: #d7e4de;
+      padding: 7px 14px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .preview-tools button.on {
+      background: #4b9b8d;
+      border-color: #89c9b9;
+      color: #fff;
+    }
+    body.desktop .phone {
+      width: min(1240px, 94vw);
+      height: min(780px, calc(100vh - 120px));
+      padding: 0;
+      border-radius: 16px;
+      background: #14211e;
+    }
+    body.desktop .phone::before,
+    body.desktop .phone::after { display: none; }
+    body.desktop iframe {
+      width: 100%;
+      height: 100%;
+      border-radius: 16px;
+      transform: none;
+    }
+    body {
+      background:
+        radial-gradient(circle at 18% 12%, rgba(155,140,255,.20), transparent 30%),
+        radial-gradient(circle at 82% 68%, rgba(114,215,199,.09), transparent 34%),
+        radial-gradient(rgba(231,185,111,.10) .7px, transparent .7px),
+        #0f1022;
+      color: #eee9fb;
+    }
+    body::before, body::after { border-color: rgba(199,184,255,.14); }
+    .caption { color: #cfc5e7; }
+    .caption::before { background: #e7b96f; box-shadow: 0 0 0 4px rgba(231,185,111,.10); }
+    .caption b { color: #f0e5ff; }
+    .phone {
+      border-color: rgba(199,184,255,.24);
+      background: linear-gradient(145deg, #35284f, #18152c 52%, #2a2142);
+      box-shadow: 0 38px 100px rgba(0,0,0,.66), 0 0 0 1px rgba(255,255,255,.05), inset 0 0 0 1px rgba(255,255,255,.05);
+    }
+    iframe { background: #f5f1fb; }
+    .hint { color: #9186aa; }
+    .preview-tools button {
+      border-color: rgba(199,184,255,.26);
+      background: rgba(255,255,255,.06);
+      color: #dcd2f2;
+    }
+    .preview-tools button.on {
+      background: #705aa8;
+      border-color: #b9a7ec;
+      color: #fffaff;
+    }
+    body.desktop .phone { background: #18152c; }
+    @media (prefers-reduced-motion: no-preference) {
+      .phone { animation: settle .55s cubic-bezier(.22,1,.36,1) both; }
+      @keyframes settle {
+        from { opacity: 0; transform: translateY(14px) scale(.985); }
+        to { opacity: 1; transform: none; }
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="caption"><b>工作冒险手账</b> · 界面预览</div>
+    <div class="preview-tools">
+      <button type="button" data-preview-mode="mobile" class="on">手机预览</button>
+      <button type="button" data-preview-mode="desktop">桌面预览</button>
+    </div>
+    <div class="phone">
+      <iframe src="./?v=purple-starry-1" title="项目记录器界面"></iframe>
+    </div>
+    <div class="hint">在手机尺寸下查看真实交互</div>
+  </div>
+  <script>
+    document.querySelectorAll("[data-preview-mode]").forEach(button => {
+      button.onclick = () => {
+        const mode = button.dataset.previewMode;
+        document.body.classList.toggle("desktop", mode === "desktop");
+        document.querySelectorAll("[data-preview-mode]").forEach(item => {
+          item.classList.toggle("on", item === button);
+        });
+      };
+    });
+  </script>
+</body>
+</html>
+

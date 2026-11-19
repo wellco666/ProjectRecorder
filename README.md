@@ -27,7 +27,7 @@ Python 3.9 以上（建议 3.11 / 3.12）。界面用 PyQt6；项目、员工和
 - 没登录时仍可使用本地项目、工时、预测和知识库；登录后社区自动同步。
 - 退出账号不会删除任何本地项目数据。
 
-## 八个页签
+## 九个页签
 
 ### 驾驶舱
 所有项目一览。顶部四张指标卡（在管项目 / 需要处理 / 在岗员工 / 本周工时），下面一张表按风险排序。
@@ -48,6 +48,22 @@ Python 3.9 以上（建议 3.11 / 3.12）。界面用 PyQt6；项目、员工和
 - **手机端入口**：员工和老板底部导航都新增了「星球」。
 
 第一次使用前，管理员需要把 [`mobile/sql/community.sql`](mobile/sql/community.sql) 整个文件粘贴到 Supabase SQL Editor 运行一次。该脚本会创建社区表、权限策略和发帖/删除函数。
+
+
+
+组织创始人与股权规则由 [`mobile/sql/organization-founders-v1.sql`](mobile/sql/organization-founders-v1.sql) 安装。它增加创始人邀请、首次分股、原始股份 1.1 投票权重、股权表决、股份转让、员工持股池、解散表决和活动组织切换；现有企业所有者会迁移为创始人。
+
+公司改名和「添加公司成员」由 [`mobile/sql/organization-management-v1.sql`](mobile/sql/organization-management-v1.sql) 安装。它提供受 `company.manage` / `governance.manage` 权限保护的组织改名与成员添加 RPC；客户端仍然不能直接写治理表。
+
+阶段一的「主公司 + 成员邀请」由 [`mobile/sql/phase1-primary-company-member-invites-v1.sql`](mobile/sql/phase1-primary-company-member-invites-v1.sql) 安装。它为已有成员自动补主公司，加入新公司不会退出原公司，普通成员必须接受邀请后才生效。
+
+「我的公司」页面由 [`mobile/sql/phase1-my-companies-v1.sql`](mobile/sql/phase1-my-companies-v1.sql) 安装。可查看主公司、其他成员关系和当前成员目录；普通成员只看到公开角色信息，管理身份才看到账号、邮箱、成员状态和持股信息。
+
+今日工作台固定为四个板块：今日焦点、待我处理、正在工作、公司动态，每块最多显示三条。应用版本信息来自 `mobile/version.json`，更新检查读取仓库根目录的 `latest.json`，只提示下载，不自动安装。
+
+v2.1 社区底座是在旧社区表上的增量升级。安装完 `community.sql` 后，再运行 [`mobile/sql/community-forum-v1.sql`](mobile/sql/community-forum-v1.sql)。它会增加板块、评论、点赞、收藏、举报、关注、通知、搜索、分页、板块管理和社区数据统计；旧帖子会自动迁入「综合讨论」，旧 RPC 继续保留以便回滚。
+
+社区作者头像和主公司职业由 [`mobile/sql/community-author-cards-v1.sql`](mobile/sql/community-author-cards-v1.sql) 提供。帖子与评论显示作者设置的社区头像，并优先显示主公司的最高职级职业。
 
 #### 我的知识库（本地）
 
@@ -71,6 +87,19 @@ Python 3.9 以上（建议 3.11 / 3.12）。界面用 PyQt6；项目、员工和
 
 员工账号登录桌面端默认使用简单模式，只显示“今日”和知识星球，不显示预算、团队风险和老板数据；具备管理、财务、审计或治理权限后可在桌面顶部切换高级模式。
 
+### 经营决策中心
+
+高级模式默认进入“经营决策中心”，把跨项目、跨模块的影响集中成一条处理队列：
+
+- **入口权限**：只有具备管理、财务、审计或治理能力的身份可进入高级模式和决策中心；简单模式员工看不到入口。
+- **决策队列**：按交付影响天数、涉及金额、风险等级和等待时间排序；每条决策展示来源证据、负责人、截止时间和处理状态。
+- **统一审批**：请假、工时、费用、采购、奖励、任务延期和身份事项进入同一个审批收件箱。
+- **证据下钻**：决策和审批带有结构化来源记录，可追到任务、工时、审批、任务延期或身份治理事项。
+- **幂等与审计**：批准、拒绝、退回补充、取消、确认、分派、延期和关闭都要求幂等键，并由服务端写入审批事件和企业审计。
+- **授权边界**：不同审批类型校验不同权限；严重/高风险或金额达到 5 万元的审批要求高管身份。身份事项沿用股东权重投票，不由普通审批绕过。
+- **真实动作**：桌面和手机按钮只在服务端返回对应 `actions` 能力时显示；没有数据时显示空状态，不用假数据填充。
+- **数据库边界**：决策和审批表启用 RLS，直接表权限收回，客户端只可调用 `get_decision_center`、`act_on_decision` 和 `act_on_approval` 三个 SECURITY DEFINER RPC。
+
 ### 企业身份与股东投票
 
 电脑端「企业身份」页和手机端「治理」页读取同一套 Supabase 企业数据。当前已实现：
@@ -90,6 +119,29 @@ Python 3.9 以上（建议 3.11 / 3.12）。界面用 PyQt6；项目、员工和
 - **模式记忆**：服务端返回并保存 `preferred_mode`；桌面和手机切换后跨设备生效，权限撤销后自动回退到简单模式。
 - **审计留痕**：提案、投票、股份变更、模板变更、临时兼任、积分池和积分发放均写入企业审计表。
 
+### 股东大会、月度会议和请假记录
+
+在现有企业身份与治理能力之上，新增独立的股东大会议程：
+
+- **月度例行会议**：系统自动为当前月份建立一次例行股东大会，默认安排在本月最后一天 18:00（上海时区）；每月最多一场有效例行会议。
+- **临时股东大会**：持股股东可以发起临时会议，但必须填写特殊原因；本月只能存在一场有效临时会议。
+- **同意门槛**：临时会议的召集需要超过半数在册股东按人数同意，不按股份权重计算。发起人自动投赞成票。
+- **出席登记**：股东可以登记出席、缺席或请假；登记前必须输入当前登录账号的员工号或老板号完成身份验证，请假还必须填写原因。
+- **会议纪要**：企业所有者、董事长或具备治理管理权限的身份可以结束会议并记录纪要。
+- **审计与权限**：会议、召集投票、出席和请假均由 SECURITY DEFINER RPC 写入企业审计；客户端不能直接写表。
+- **桌面和手机入口**：电脑端位于「企业身份 → 股东大会」，手机端位于「更多 → 治理 → 股东大会」。
+
+股东大会升级顺序：
+
+```text
+mobile/sql/enterprise-identity.sql
+mobile/sql/enterprise-governance-v2.sql
+mobile/sql/shareholder-meetings-v1.sql
+mobile/sql/shareholder-meeting-verification-v1.sql
+```
+
+`install-unified.sql` 末尾包含受前置条件保护的股东大会区块。首次部署后打开治理页，系统会自动建立当前月例行会议。
+
 阶段一升级顺序：
 
 部署时，在现有数据库脚本之后按以下顺序运行：
@@ -103,6 +155,112 @@ Python 3.9 以上（建议 3.11 / 3.12）。界面用 PyQt6；项目、员工和
 `community.sql` 必须先于治理扩展，因为付费知识字段、列表 RPC 和解锁 RLS 依赖社区表。`install-unified.sql` 不包含阶段一治理扩展，`enterprise-governance-v2.sql` 必须单独执行。
 
 桌面端和手机端共享同一套治理数据。直接修改股份的旧 RPC 已只保留为内部/初始化权限，普通客户端不能再调用；股份和模板高风险改动必须经过股东表决。
+
+阶段 2A 部署顺序：
+
+在阶段一治理扩展和任务延期脚本之后运行决策中心迁移：
+
+```text
+mobile/sql/enterprise-identity.sql
+mobile/sql/community.sql
+mobile/sql/community-forum-v1.sql
+mobile/sql/organization-founders-v1.sql
+mobile/sql/organization-management-v1.sql
+mobile/sql/phase1-primary-company-member-invites-v1.sql
+mobile/sql/phase1-my-companies-v1.sql
+mobile/sql/platform-stability-v1.sql
+mobile/sql/enterprise-governance-v2.sql
+mobile/sql/task-accept-extension.sql
+mobile/sql/decision-approvals-v1.sql
+```
+
+`decision-approvals-v1.sql` 会建立 `decision_items`、`approval_requests` 及事件表，并把现有请假、工时、奖励兑换、任务延期和身份任免数据同步进统一审批。脚本纯 ASCII、可重复执行；业务表只通过 SECURITY DEFINER RPC 读写，直接表权限对客户端收回。
+
+`install-unified.sql` 末尾包含一个受前置条件保护的 Phase 2A 区块：基础统一安装时如果阶段一或任务延期表还不存在，会跳过并输出提示；完成前置迁移后重新执行统一安装脚本即可应用。独立部署时仍以 `mobile/sql/decision-approvals-v1.sql` 为准。
+
+### 经营分析、工时经营标签、能力与绩效证据
+
+Phase 2B 在经营决策中心之后增加管理经营分析，并把执行记录与经营结果对齐：
+
+- **入口权限**：桌面端「经营分析」和手机端「经营摘要」只在高级模式且具备管理身份时显示；简单模式不拉取也不缓存经营数据，权限撤销时客户端立即清空 `DB.operations`。
+- **四维权限**：Phase 2B RPC 继续使用身份模板的 scope 与 conditions。`project_ids` 限制项目经理只能读写指定项目，`profile_ids` / `department` 限制人员与绩效范围，`amount_limit` 逐个校验合同、开票、回款和各类成本字段；看板会按财务、人员、绩效和工时权限过滤字段。跨企业项目写入会先写入安全审计再返回拒绝。技能编辑即使修改自己，也必须具备显式 `people.manage` 与对应人员范围。
+- **项目经营口径**：合同额、已开票、已回款、应付/已付外包、人力成本、其他成本、预计完工成本、预计毛利、毛利率、开票到期日、付款条款和回款缺口均由服务端聚合。逾期未收会自动生成回款预警并写入 Phase 2A 决策队列。
+- **工时经营标签**：工时支持可计费、加班、项目/售前/内部、返工、等待和出差。新增字段都有兼容默认值；本地手工工时通过独立迁移队列预留云 UUID、上传工时并消除数字 ID 的永久等待，随后再同步经营维度。手机团队页可直接编辑云端工时的经营标签。
+- **能力缺口**：技能记录包含等级、证书、可用时间和有效期；未来 2-4 周需求与可用时间形成可下钻的能力缺口。能力缺口要求人员查看范围；只有项目权限的管理者会看到权限说明，而不是把全部需求误报为短缺。桌面和手机管理视图提供真实的技能维护与能力需求维护入口，并显示来源 ID。
+- **绩效证据**：准时率、一次通过率、返工、协作、复杂度、经营贡献和结构化客户评价组成证据记录。来源必须是属于该员工的任务、工时或审批记录；绩效分包含复杂度与经营贡献。员工可以查看自己的依据并提交说明，有权限的管理者才能复核。
+- **绩效边界**：绩效分数只依据交付和质量证据计算，不直接决定工资或晋升；简单模式不会展示跨人员经营或绩效对比，知识星球也不承载这些敏感数据。
+- **数据库边界**：经营、技能、需求、绩效和工时标签表启用 RLS，直接表权限收回；成功写入进入企业审计，越权尝试进入独立的 `operations_security_audit`，避免异常回滚吞掉安全事件。工时汇总只统计已批准工时。
+
+阶段 2B 部署顺序：
+
+```text
+mobile/sql/enterprise-identity.sql
+mobile/sql/community.sql
+mobile/sql/enterprise-governance-v2.sql
+mobile/sql/task-accept-extension.sql
+mobile/sql/decision-approvals-v1.sql
+mobile/sql/execution-tracking-v1.sql
+mobile/sql/operations-economics-v1.sql
+mobile/sql/work-intake-v1.sql
+```
+
+`decision-approvals-v1.sql` 会建立 `decision_items`、`approval_requests` 及事件表，并把现有请假、工时、奖励兑换、任务延期和身份任免数据同步进统一审批。脚本纯 ASCII、可重复执行；业务表只通过 SECURITY DEFINER RPC 读写，直接表权限对客户端收回。
+
+`install-unified.sql` 末尾包含受前置条件保护的 Phase 2A、Phase 3 和 Phase 2B 区块：基础统一安装时如果阶段一、任务延期、决策中心或执行追踪表还不存在，会跳过并输出提示；完成前置迁移后重新执行统一安装脚本即可应用。独立部署时仍以 `mobile/sql/decision-approvals-v1.sql`、`mobile/sql/execution-tracking-v1.sql` 和 `mobile/sql/operations-economics-v1.sql` 为准。
+
+### 执行追踪、验收、依赖、交接与变更
+
+Phase 3 建立可追踪的执行闭环，并作为经营绩效聚合的验收数据源；部署时应先于经营分析迁移：
+
+- **验收闭环**：任务提交时必须填写验收标准和交付证据，并指定独立验收人。状态只允许待验收、返工和已验收；只有已验收是最终完成，提交人不能自行验收。
+- **依赖影响**：任务支持前后置依赖和依赖间隔。服务端拒绝循环依赖，并按最长累计路径计算下游延迟天数、预计日期和责任人，供桌面和手机下钻。
+- **交接确认**：交接物、发起人、接收人和部门都会记录。交接必须由接收方确认或拒绝，发起人不能代确认。
+- **变更控制**：变更申请记录 `decision_items` 范围、原因、紧急程度，以及工期、成本、资源和风险影响。未批准的变更不会覆盖原计划或项目日期、预算、任务计划；高影响或跨部门变更进入 Phase 2A 决策队列。
+- **审计与权限**：`task_acceptance`、`task_dependencies`、`task_handoffs`、`change_requests` 和审计表启用 RLS，直接表写入收回。成功操作写入 `execution_audit` 和企业审计，越权尝试写入 `execution_security_audit`。
+- **客户端入口**：桌面「执行追踪」只在高级管理模式显示；手机所有已登录成员都可进入，但服务端只返回本人任务、本人交接和授权管理范围。所有按钮均调用真实 RPC。
+
+阶段 3 部署顺序：
+
+```text
+mobile/sql/enterprise-identity.sql
+mobile/sql/community.sql
+mobile/sql/enterprise-governance-v2.sql
+mobile/sql/task-accept-extension.sql
+mobile/sql/decision-approvals-v1.sql
+mobile/sql/execution-tracking-v1.sql
+mobile/sql/operations-economics-v1.sql
+```
+
+`install-unified.sql` 末尾按要求先执行 Phase 3、再执行依赖 `task_acceptance` 的 Phase 2B 区块；决策中心和执行追踪基础表未就绪时会跳过并输出提示。独立部署仍以 `mobile/sql/execution-tracking-v1.sql` 为准。执行追踪集成测试位于 `tests.test_execution_integration`，使用 `PROJECT_RECORDER_TEST_DATABASE_URL` 指向一次性测试库。
+
+
+### 工作入口、公开需求与分诊
+
+Phase 4 把电脑和手机上的临时事项统一成可追踪需求：
+
+- **快速记录**：电脑「工作入口」和手机「需求」页都可以直接记录类型、标题、详情和五项优先级因素。优先级由服务端计算，返回逐项分值和总分；管理者覆盖排序必须填写理由。
+- **公开表单与二维码**：管理端可新建 `intake.html?token=...` 公开入口，复制链接或显示二维码。外部提交者只看到公司名称、表单名称、允许类型和自己的申请编号。
+- **邮件入口**：管理端可创建 `intake+随机令牌@配置域名` 地址，邮件网关把发件人、主题和正文转发到 `ingest_intake_email`。地址令牌和发送频率都由服务端校验。
+- **分诊与 SLA**：故障 2 小时、客户/销售/临时事项 1 天、内部改进 3 天。超时未分诊会自动升级给企业负责人并进入待分诊队列；可调用 `intake_escalate_sla` 或配置定时任务执行。
+- **重复需求**：提交时返回相似度提示；管理端可查看候选、合并重复。合并写入 `merged_into_id`、双向关联并复制全部沟通记录，原始需求和提出人不会被删除。
+- **外部沟通隔离**：公开回复进入公开消息流，`get_public_intake_status` 同时校验申请编号和邮箱；内部备注只对管理端可见，外部状态接口不会返回内部字段。
+- **转入执行**：需求可转项目、转任务或售前支持，保留 `linked_project_id`、`linked_task_id` 和转换事件；转换不会丢失来源、提出人、验收线索和沟通记录。
+- **安全边界**：公开表单启用服务端限流、邮箱校验和同意确认；所有业务表启用 RLS，直接写入被收回，成功和越权操作分别进入企业审计与 `intake_security_audit`。
+
+Phase 4 部署顺序：
+
+```text
+mobile/sql/enterprise-identity.sql
+mobile/sql/community.sql
+mobile/sql/enterprise-governance-v2.sql
+mobile/sql/task-accept-extension.sql
+mobile/sql/decision-approvals-v1.sql
+mobile/sql/execution-tracking-v1.sql
+mobile/sql/operations-economics-v1.sql
+mobile/sql/work-intake-v1.sql
+```
+
+`install-unified.sql` 末尾包含受前置条件保护的 Phase 4 区块。公开静态页为 `mobile/intake.html`，手机管理页加载 `mobile/intake.js`，二维码组件为 `mobile/vendor/qrcode.min.js`。邮件网关需把收到的邮件转发给 `ingest_intake_email`，实际发信由 `intake_notifications` 出站队列处理。
 
 ### 统一云端部署
 
@@ -363,23 +521,44 @@ Compress-Archive -Path dist\项目记录器.exe `
 python -m pip install -r requirements-test.txt
 $env:PROJECT_RECORDER_TEST_DATABASE_URL = 'postgresql://postgres:postgres@127.0.0.1:5432/project_recorder_test'
 python -m unittest tests.test_enterprise_governance_integration -v
+python -m unittest tests.test_decision_integration -v
+python -m unittest tests.test_execution_integration -v
+python -m unittest tests.test_operations_integration -v
+python -m unittest tests.test_intake_integration -v
+python -m unittest tests.test_meeting_integration -v
 ```
 
 运行前按以下顺序在测试库执行：
 
 ```text
+mobile/sql/setup-tables.sql
+mobile/sql/migrate-notify.sql
+mobile/sql/work-session.sql
+mobile/sql/merit-ledger.sql
+mobile/sql/rewards-leave.sql
+mobile/sql/unified-platform.sql
 mobile/sql/enterprise-identity.sql
 mobile/sql/community.sql
 mobile/sql/enterprise-governance-v2.sql
+mobile/sql/task-accept-extension.sql
+mobile/sql/decision-approvals-v1.sql
+mobile/sql/execution-tracking-v1.sql
+mobile/sql/operations-economics-v1.sql
+mobile/sql/work-intake-v1.sql
+mobile/sql/shareholder-meetings-v1.sql
+mobile/sql/shareholder-meeting-verification-v1.sql
 ```
+
+决策中心集成测试位于 `tests.test_decision_integration`，覆盖审批回写、幂等重复请求、事件/审计记录和越权拒绝。
+经营集成测试位于 `tests.test_operations_integration`，覆盖经营聚合、逐字段金额上限、跨企业项目拒绝审计、技能自助编辑权限、项目-only 能力权限、工时标签、员工证据说明、经理复核和审计。执行追踪集成测试位于 `tests.test_execution_integration`，会实际执行 PL/pgSQL 函数体，覆盖看板全部分区、验收/评级/积分门禁、返工重开、权限只读、中文风险与紧急度归一化、决策双写同步、可选依赖、绩效聚合、接收方交接、变更不改计划及直接表写入拒绝。
 
 注意：
 
 - `PROJECT_RECORDER_TEST_DATABASE_URL` 未设置或未安装 `psycopg2-binary` 时，集成测试会自动跳过，不影响普通 `unittest`。
 - CI 中把该变量保存为受保护的 secret，指向临时数据库；不要让测试连接生产库。
-- 集成测试需要 `authenticated`、`anon`、`auth.uid()` 和 Supabase RLS 环境；普通本地 PostgreSQL 需先模拟这些角色和 JWT claim 设置。
+- 集成测试需要 `authenticated`、`anon`、`auth.uid()`、`auth.users`、`pgcrypto` 和 Supabase RLS 环境；普通本地 PostgreSQL 需先创建这些角色/函数与 schema，再按上方顺序执行迁移。仅有 `pglast` 不能验证 PL/pgSQL 函数体，因此发布前必须让该 opt-in 套件实际调用 RPC。
 - 测试大多在事务中回滚；并发发分测试会提交隔离夹具并在 `finally` 中清理，因此必须使用一次性数据库。
-- 发布前除集成测试外，还应执行 `python check.py`、`node build-www.js`、`node selfcheck.js`、SQL `pglast` 解析和 `npx cap sync android`。
+- 发布前应先让 opt-in 集成测试在一次性数据库实际执行全部 RPC，再执行 `python check.py`、`node build-www.js`、`node selfcheck.js`、SQL `pglast` 解析和 `npx cap sync android`。
 
 ## 自检
 

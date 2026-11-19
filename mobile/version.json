@@ -1,0 +1,11 @@
+{
+  "versionCode": 33,
+  "versionName": "2.0.31",
+  "releasedAt": "2026-11-15",
+  "notes": [
+    "新增资金模块：报销、预支、专项经费申请。",
+    "按金额分级审批：直属上级/财务/老板/董事会；支持资金池、支付和核销。",
+    "资金附件存私有桶；支持发票/收据上传与支付跟踪。"
+  ],
+  "downloadUrl": "https://github.com/lxcty3/ProjectRecorder/releases/latest/download/ProjectRecorder-latest.apk"
+}

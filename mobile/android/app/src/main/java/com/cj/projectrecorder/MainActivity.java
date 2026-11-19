@@ -11,6 +11,8 @@ public class MainActivity extends BridgeActivity {
         // Push SDK initialization is explicitly consent-gated from JavaScript.
         registerPlugin(NotificationSettingsPlugin.class);
         registerPlugin(GetuiPushPlugin.class);
+        registerPlugin(AppUpdatePlugin.class);
+        registerPlugin(AudioRecorderPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

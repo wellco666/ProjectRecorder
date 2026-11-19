@@ -51,6 +51,8 @@ class PhaseOneFinalBlockersTest(unittest.TestCase):
         ):
             self.assertIn(marker, helper)
         listing = self.rpc_definition("list_knowledge_posts")
+        self.assertNotIn("_identity_bootstrap", listing)
+        self.assertIn("select e.id into v_eid", listing)
         self.assertIn("'content',case", listing)
         self.assertIn("enterprise_knowledge_unlocks", listing)
         self.assertIn("'locked',", listing)
@@ -320,6 +322,34 @@ class PhaseOneFinalBlockersTest(unittest.TestCase):
             "using (author_id = auth.uid() or is_required or unlock_cost = 0)",
             install,
         )
+
+    def test_identity_motion_aggregate_avoids_correlated_order_by(self):
+        import pglast
+
+        for name in ('enterprise-identity.sql', 'enterprise-governance-v2.sql'):
+            sql = read('mobile/sql/' + name)
+            pglast.parse_sql(sql)
+            self.assertNotIn(
+                "order by case when x.status='open' then 0 else 1 end,x.created_at desc",
+                sql,
+            )
+
+    def test_standalone_community_migration_adds_unlock_columns(self):
+        import pglast
+
+        community = read("mobile/sql/community.sql")
+        pglast.parse_sql(community)
+        create_start = community.index(
+            "create table if not exists public.community_posts"
+        )
+        index_start = community.index("create index", create_start)
+        create_block = community[create_start:index_start]
+        self.assertIn("unlock_cost integer", create_block)
+        self.assertIn("is_required boolean", create_block)
+        for column in ("unlock_cost", "is_required"):
+            alter = f"add column if not exists {column}"
+            alter_start = community.index(alter, create_start)
+            self.assertLess(alter_start, community.index("create or replace function", create_start))
 
     def test_authorized_ledger_is_not_truncated(self):
         point_state = self.rpc_definition("get_point_state")

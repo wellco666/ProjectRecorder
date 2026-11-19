@@ -3,6 +3,10 @@
 
     <queries>
         <intent><action android:name="com.getui.sdk.action" /></intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/vnd.android.package-archive" />
+        </intent>
     </queries>
 
     <application
@@ -39,12 +43,24 @@
         </provider>
 
         <service android:name=".GetuiPushIntentService" android:exported="false" />
+        <service
+            android:name=".AudioRecorderService"
+            android:foregroundServiceType="microphone"
+            android:exported="false" />
 
     </application>
 
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 应用内更新：下载新 APK 后交给系统安装器。
+         用户仍需在系统设置里允许本应用“安装未知应用”。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 会议录音：WebView 的 getUserMedia/MediaRecorder 需要这两条。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <!-- 通知。
  
